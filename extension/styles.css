@@ -1,0 +1,27 @@
+/* Trakt Titles - title for poster-only cards */
+
+.trakt-helper-poster-title {
+    box-sizing: border-box !important;
+    display: block !important;
+    width: 100% !important;
+    margin: 2px 0 -10px !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    font-size: calc(1rem - 2px) !important;
+    font-weight: 600 !important;
+    line-height: 1.25 !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+}
+
+/* Search 页在原生卡片上额外保留了一点标题下间距，轻微收紧。 */
+.trakt-helper-search-title {
+    margin-bottom: -16px !important;
+    line-height: 1.25 !important;
+}
+
+/* Lift the centered cover badge slightly so its card title stays on the same
+   baseline as cards without a badge. */
+.trakt-helper-cover-badge {
+    transform: translateY(-6px) !important;
+}

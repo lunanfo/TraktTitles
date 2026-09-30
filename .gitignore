@@ -1,0 +1,9 @@
+.DS_Store
+*.log
+node_modules/
+dist/
+.idea/
+.vscode/
+
+# 抓包文件里带着 Authorization: Bearer <token>，永远不要提交
+*.har

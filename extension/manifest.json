@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Trakt Titles",
+  "version": "1.0.0",
+  "description": "Restores missing titles on poster-only Trakt cards.",
+  "homepage_url": "https://github.com/lunanfo/TraktTitles",
+  "icons": {
+    "16": "icons/trakt-circlemark-16.png",
+    "32": "icons/trakt-circlemark-32.png",
+    "48": "icons/trakt-circlemark-48.png",
+    "128": "icons/trakt-circlemark-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://trakt.tv/*",
+        "https://app.trakt.tv/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_title": "Trakt Titles",
+    "default_icon": {
+      "16": "icons/trakt-circlemark-16.png",
+      "32": "icons/trakt-circlemark-32.png",
+      "48": "icons/trakt-circlemark-48.png",
+      "128": "icons/trakt-circlemark-128.png"
+    }
+  }
+}
