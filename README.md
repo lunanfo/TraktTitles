@@ -1,13 +1,15 @@
 # Trakt Titles
 
-给 **Trakt 网页卡片补剧名**的 Chrome 扩展 / Tampermonkey 脚本。
+给 **Trakt 网页卡片补剧名与双语汉化** 的 Chrome 扩展 / Tampermonkey 脚本。
 
-Trakt 有些位置（推荐、日历、列表等）只显示海报、不显示剧名。脚本做两件事：
+Trakt 网页端（[app.trakt.tv](https://app.trakt.tv)）在部分位置（如推荐、日历、海报列表等）仅显示海报不显示剧名，且智能列表（Smart Lists）和搜索页未请求中文译名、仅显示英文。
 
-1. **补标题** —— 读取海报链接里已有的剧名，在海报下方补回标题。标题会清理掉无障碍文本中的“海报”、poster、引号等描述性文字。
-2. **对齐徽标** —— 海报底部居中的浮层徽标（如“新”）会把标题挤偏，脚本把它上移一点，让有徽标和没徽标的卡片标题落在同一条基线上。
+本项目实现以下功能：
 
-脚本不修改 Trakt API 请求，不添加翻译服务，也不改变已经显示标题的卡片；页面使用 Trakt 当前已经返回的语言标题。
+1. **补全卡片标题** —— 自动识别仅有海报的卡片，在海报下方补回规范剧名（自动清理“海报”、poster、引号等多余文字）。
+2. **智能列表 & 搜索页双语显示** —— 针对智能列表视图（`/lists/smart/view`）与搜索页（`/search`），利用 Trakt 官方批量接口（`intl/bulk`）获取中文译名，实现与待看列表（Watchlist）一致的原生双语排版：**主标题中文名 + 副标题英文原名**。
+3. **零多余请求与持久缓存** —— 其他页面中已在 HTML 后台（`aria-label` / `img[alt]`）提供中文名称的卡片直接复用 DOM，不发起任何多余 API；已请求的媒体信息与译名通过 `sessionStorage` 内存缓存，避免重复请求，保证页面极速加载。
+4. **对齐徽标** —— 海报底部居中的浮层徽标（如“新”）微调上移，保持所有卡片标题落在同一条水平基线上。
 
 ---
 
@@ -52,30 +54,18 @@ Trakt 有些位置（推荐、日历、列表等）只显示海报、不显示�
    - 点击左上角的 **「加载已解压的扩展程序 (Load unpacked)」**。
    - 选择项目根目录下的 **`extension/`** 文件夹。
 5. **开始体验**：
-   - 访问 [app.trakt.tv](https://app.trakt.tv) 或 [trakt.tv](https://trakt.tv)，原本只有海报、没有剧名的卡片会自动补上剧名，海报底部的浮层徽标也会微调位置，让标题对齐。
+   - 访问 [app.trakt.tv](https://app.trakt.tv)，原本只有海报、没有剧名的卡片会自动补齐剧名；智能列表和搜索页卡片将以中文 + 原名双语显示。
 
 > [!NOTE]
-> 扩展和脚本做的是同一件事，二选一即可，不必同时装。
+> 扩展和脚本功能完全一致，二选一安装即可。
 
 ---
 
-## 开发（可选，只有重新构建和跑测试才用到 Node）
-
-`npm` 在这里只做两件事，而且都只是 `node` 命令的包装，不影响上面的安装使用：
-
-| 命令 | 实际执行 | 作用 |
-| --- | --- | --- |
-| `npm run build` | `node tools/build-userscript.js` | 把 `extension/content.js` + `styles.css` + 版本号 + 图标拼成 `userscript/TraktTitles.user.js` |
-| `npm test` | 两条 `node tests/injection.test.js` | 用 jsdom 模拟 DOM，验证标题注入逻辑 |
-| `npm install` | — | 只为了装测试用的 jsdom |
-
-不用 npm 也一样跑：
+## 开发与构建 (Development)
 
 ```bash
-node tools/build-userscript.js
-
-TARGET=extension node tests/injection.test.js
-TARGET=userscript node tests/injection.test.js
+npm run build   # 重新打包构建 Tampermonkey 脚本
+npm test        # 执行单元测试与 DOM 注入测试
 ```
 
-`userscript/TraktTitles.user.js` 是**构建产物**，不要手改：要改逻辑请改 `extension/content.js`，要改样式请改 `extension/styles.css`，然后重新构建一次，油猴里的脚本才会更新。
+`userscript/TraktTitles.user.js` 是由 `tools/build-userscript.js` 从 `extension/content.js` 和 `extension/styles.css` 自动编译生成的产物，请勿直接手动修改该文件。

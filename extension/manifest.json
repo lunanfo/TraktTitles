@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Trakt Titles",
-  "version": "1.0.0",
-  "description": "Restores missing titles on poster-only Trakt cards.",
+  "version": "1.1.0",
+  "description": "Restores missing titles on poster-only Trakt cards and adds bilingual titles for smart lists and search.",
   "homepage_url": "https://github.com/lunanfo/TraktTitles",
   "icons": {
     "16": "icons/trakt-circlemark-16.png",
@@ -22,6 +22,7 @@
       "css": [
         "styles.css"
       ],
+      "world": "MAIN",
       "run_at": "document_start"
     }
   ],

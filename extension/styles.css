@@ -20,6 +20,22 @@
     line-height: 1.25 !important;
 }
 
+/* 原名副标题（在有充裕垂直空间的摘要/详情卡片中使用，如智能列表详情网格页） */
+.trakt-helper-original-title {
+    box-sizing: border-box !important;
+    display: block !important;
+    width: 100% !important;
+    margin: -4px 0 2px !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    font-size: calc(1rem - 4px) !important;
+    font-weight: 400 !important;
+    line-height: 1.25 !important;
+    color: var(--color-text-secondary, #999) !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+}
+
 /* Lift the centered cover badge slightly so its card title stays on the same
    baseline as cards without a badge. */
 .trakt-helper-cover-badge {
