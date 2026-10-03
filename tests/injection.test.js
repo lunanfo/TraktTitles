@@ -290,12 +290,184 @@ async function runLivePosterResolveTest() {
   assert.strictEqual(runnerSub, null, 'Poster card should not have separate subtitle line');
 }
 
+async function runNowPlayingTest() {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div class="trakt-now-playing-container">
+      <div class="trakt-card now-playing-card">
+        <a href="/movies/unabomber-2026" aria-label="UNABOMBER海报">
+          <div class="trakt-card-cover"><img src="now-playing.jpg"></div>
+        </a>
+      </div>
+      <div class="trakt-now-playing-content svelte-11wjdk4">
+        <div class="trakt-now-playing-header svelte-11wjdk4"><span class="secondary small">正在播放</span></div>
+        <span class="bold ellipsis">UNABOMBER</span>
+        <div class="trakt-now-playing-progress svelte-11wjdk4">
+          <div class="trakt-now-playing-info svelte-11wjdk4">
+            <span class="trakt-now-playing-remaining ellipsis small svelte-11wjdk4">剩余 1小时 24分钟</span>
+            <span class="trakt-now-playing-ends-at ellipsis small svelte-11wjdk4">结束于 12:26</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body></html>`, {
+    url: 'https://app.trakt.tv/home',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true
+  });
+
+  dom.window.sessionStorage.setItem('trakt_media_info_cache', JSON.stringify({
+    'movie:unabomber-2026': { type: 'movie', slug: 'unabomber-2026', id: 1224034, title: 'UNABOMBER' }
+  }));
+  dom.window.sessionStorage.setItem('trakt_intl_zh_cache', JSON.stringify({
+    'movie:1224034': '大学炸弹客'
+  }));
+
+  dom.window.eval(source);
+  await wait(180);
+
+  const doc = dom.window.document;
+  const title = doc.querySelector('.trakt-now-playing-content > span.bold.ellipsis');
+  assert.strictEqual(title.textContent, '大学炸弹客', 'now playing movie title becomes the official Chinese name');
+  assert.strictEqual(
+    doc.querySelector('.trakt-now-playing-remaining').textContent,
+    '剩余 1小时 24分钟',
+    'now playing remaining time is untouched'
+  );
+  assert.strictEqual(doc.querySelector('.trakt-now-playing-ends-at').textContent, '结束于 12:26',
+    'now playing end time is untouched');
+  assert.strictEqual(doc.querySelectorAll('.trakt-now-playing-container .trakt-helper-poster-title').length, 0,
+    'no extra title node is injected into the now playing toast');
+}
+
+async function runNowPlayingEpisodeTest() {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div class="trakt-now-playing-container">
+      <div class="trakt-card now-playing-card">
+        <a href="/shows/the-night-agent/seasons/2/episodes/1" aria-label="第 2 季 · 第 1 集 - The Night Agent海报">
+          <div class="trakt-card-cover"><img src="now-playing.jpg"></div>
+        </a>
+      </div>
+      <div class="trakt-now-playing-content svelte-11wjdk4">
+        <div class="trakt-now-playing-header svelte-11wjdk4"><span class="secondary small">正在播放</span></div>
+        <span class="bold ellipsis">第 2 季 · 第 1 集 - The Night Agent</span>
+        <div class="trakt-now-playing-progress svelte-11wjdk4">
+          <div class="trakt-now-playing-info svelte-11wjdk4">
+            <span class="trakt-now-playing-remaining ellipsis small svelte-11wjdk4">剩余 43分钟</span>
+            <span class="trakt-now-playing-ends-at ellipsis small svelte-11wjdk4">结束于 13:09</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body></html>`, {
+    url: 'https://app.trakt.tv/home',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true
+  });
+
+  dom.window.sessionStorage.setItem('trakt_media_info_cache', JSON.stringify({
+    'show:the-night-agent': { type: 'show', slug: 'the-night-agent', id: 170228, title: 'The Night Agent' }
+  }));
+  dom.window.sessionStorage.setItem('trakt_intl_zh_cache', JSON.stringify({
+    'show:170228': '暗夜情报员'
+  }));
+
+  dom.window.eval(source);
+  await wait(180);
+
+  const title = dom.window.document.querySelector('.trakt-now-playing-content > span.bold.ellipsis');
+  assert.strictEqual(
+    title.textContent,
+    'S2•E1 - 暗夜情报员',
+    'now playing episode compacts the season/episode label and swaps the show name'
+  );
+}
+
+async function runNowPlayingEpisodeTitleTest() {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div class="trakt-now-playing-container">
+      <div class="trakt-card now-playing-card">
+        <a href="/shows/the-gentlemen/seasons/2/episodes/5" aria-label="第 2 季 • 第 5 集 - The Gentlemen海报">
+          <div class="trakt-card-cover"><img src="now-playing.jpg"></div>
+        </a>
+      </div>
+      <div class="trakt-now-playing-content svelte-11wjdk4">
+        <div class="trakt-now-playing-header svelte-11wjdk4"><span class="secondary small">正在播放</span></div>
+        <span class="bold ellipsis">第 2 季 • 第 5 集 - The Gentlemen</span>
+        <div class="trakt-now-playing-progress svelte-11wjdk4">
+          <div class="trakt-now-playing-info svelte-11wjdk4">
+            <span class="trakt-now-playing-remaining ellipsis small svelte-11wjdk4">剩余 1小时 1分钟</span>
+            <span class="trakt-now-playing-ends-at ellipsis small svelte-11wjdk4">结束于 12:32</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body></html>`, {
+    url: 'https://app.trakt.tv/home',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true
+  });
+
+  dom.window.sessionStorage.setItem('trakt_media_info_cache', JSON.stringify({
+    'show:the-gentlemen': { type: 'show', slug: 'the-gentlemen', id: 211407, title: 'The Gentlemen' }
+  }));
+  dom.window.sessionStorage.setItem('trakt_intl_zh_cache', JSON.stringify({
+    'show:211407': '绅士们'
+  }));
+
+  const requested = [];
+  dom.window.fetch = async (url) => {
+    requested.push(String(url));
+    if (String(url).includes('/shows/the-gentlemen/seasons/2/episodes')) {
+      return {
+        ok: true,
+        clone() { return this; },
+        json: async () => ([
+          {
+            season: 2,
+            number: 5,
+            title: 'A Suburban A-Road on the Outskirts of Basingstoke',
+            ids: { trakt: 13408834 },
+            translations: [
+              { language: 'zh', country: 'tw', title: '貝辛斯托克郊區的一條主幹道' },
+              { language: 'zh', country: 'cn', title: '贝辛斯托克郊区的一条主干道' }
+            ]
+          }
+        ])
+      };
+    }
+    throw new Error('Unknown URL: ' + url);
+  };
+
+  dom.window.eval(source);
+  await wait(300);
+
+  const doc = dom.window.document;
+  const title = doc.querySelector('.trakt-now-playing-content > span.bold.ellipsis');
+  assert.strictEqual(
+    title.textContent,
+    'S2•E5 - 绅士们 - “贝辛斯托克郊区的一条主干道”',
+    'now playing episode compacts the season/episode label and appends the official Chinese episode title'
+  );
+  assert(
+    requested.some((url) => url.includes('/shows/the-gentlemen/seasons/2/episodes?translations=zh')),
+    'season episodes are requested once with translations=zh'
+  );
+  assert.strictEqual(
+    doc.querySelector('.trakt-now-playing-remaining').textContent,
+    '剩余 1小时 1分钟',
+    'now playing remaining time is still untouched'
+  );
+}
+
 (async () => {
   await runSearchTest();
   await runSmartListTest();
   await runSmartListOverviewPosterTest();
   await runLiveResolveTest();
   await runLivePosterResolveTest();
+  await runNowPlayingTest();
+  await runNowPlayingEpisodeTest();
+  await runNowPlayingEpisodeTitleTest();
   console.log(`[${process.env.TARGET || 'extension'}] RESULT: ALL PASS`);
   process.exit(0);
 })();

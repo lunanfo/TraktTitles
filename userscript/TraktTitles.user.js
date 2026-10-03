@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Trakt Titles
 // @namespace    trakt-titles
-// @version      1.1.0
+// @version      1.1.1
 // @description  Restores missing titles on Trakt poster-only cards.
 // @author       lunanfo
 // @homepageURL  https://github.com/lunanfo/TraktTitles
@@ -83,6 +83,8 @@
   // Caches
   const mediaInfoCache = new Map(); // `${type}:${slug}` -> { type, slug, id, title }
   const translationCache = new Map(); // `${type}:${id}` -> zhTitle | null
+  const episodeTitleCache = new Map(); // `${slug}:${season}:${number}` -> { en, zh }
+  const attemptedEpisodeSeasons = new Set(); // `${slug}:${season}`
   const resolvingSlugs = new Set();
   const pendingBulkIds = { movie: new Set(), show: new Set() };
   const inFlightIds = { movie: new Set(), show: new Set() };
@@ -575,10 +577,167 @@
     // 其他页面中已在 HTML 后台抓取到中文剧名的海报卡片，injectTitle 已完成补充，无需多余请求
   }
 
+  // 「正在播放」浮层（.trakt-now-playing-container）。
+  // 标题规则和官方一致：电影/剧是整行标题，单集是「第 x 季·第 y 集 - 剧名」。
+  // 本脚本：剧名换成官方中文；单集再往后补一个官方中文集标题。
+  // 其余内容（剩余时间、结束时间、进度条、海报）一律不动，
+  // 数据复用已有的 mediaInfoCache / translationCache / resolveSlug / queueBulkTranslation。
+  function localizeNowPlaying() {
+    const container = document.querySelector('.trakt-now-playing-container');
+    if (!container) return;
+
+    const titleEl = container.querySelector('.trakt-now-playing-content > span.bold.ellipsis');
+    if (!titleEl) return;
+
+    const mediaLink = container.querySelector('a[href*="/shows/"], a[href*="/movies/"]');
+    if (!mediaLink) return;
+    const parsed = parseNowPlayingHref(mediaLink.getAttribute('href') || '');
+    if (!parsed) return;
+
+    const current = (titleEl.textContent || '').trim();
+    if (!current) return;
+    // 应用重新渲染出新标题（换片/换集）时重新记录原文；本脚本写入过的文本不算。
+    if (current !== titleEl.dataset.traktZhTitle && current !== titleEl.dataset.traktSourceTitle) {
+      titleEl.dataset.traktSourceTitle = current;
+    }
+    const source = titleEl.dataset.traktSourceTitle;
+    if (!source) return;
+
+    const mediaInfo = mediaInfoCache.get(`${parsed.type}:${parsed.slug}`);
+    if (!mediaInfo) {
+      resolveSlug(parsed.type, parsed.slug);
+      return;
+    }
+
+    const transKey = `${parsed.type}:${mediaInfo.id}`;
+    if (!translationCache.has(transKey)) {
+      queueBulkTranslation(parsed.type, mediaInfo.id);
+      return;
+    }
+
+    let next = localizedNowPlayingText(source, mediaInfo.title, translationCache.get(transKey)) || source;
+
+    if (parsed.season && parsed.episode) {
+      // 「第 2 季 • 第 5 集 - 剧名」→「S2•E5 - 剧名」，整行短很多
+      next = compactSeasonEpisodeLabel(next, parsed.season, parsed.episode);
+
+      // 再往后补 - “集标题”
+      const episodeTitle = getEpisodeTitle(parsed.slug, parsed.season, parsed.episode);
+      if (episodeTitle) next += ` - “${episodeTitle}”`;
+    }
+
+    if (next === current) return;
+    titleEl.textContent = next;
+    titleEl.dataset.traktZhTitle = next;
+  }
+
+  // 把官方的季集标签（中文「第 x 季 • 第 y 集」/ 英文 SxxExx）压成 Sx•Ey。
+  // 只重写第一个 " - " 之前的那一段，后面（剧名、集标题）保持原样。
+  function compactSeasonEpisodeLabel(source, season, episode) {
+    const sep = source.indexOf(' - ');
+    if (sep === -1) return source;
+
+    const label = source.slice(0, sep);
+    if (!/季|集|Season|Episode|S[0-9]+E[0-9]+/i.test(label)) return source;
+    return `S${season}•E${episode}${source.slice(sep)}`;
+  }
+
+  // 新版 `/shows/<slug>/seasons/<s>/episodes/<e>` 和旧版
+  // `/shows/<slug>?view=episode&season=<s>&episode=<e>` 都能解析。
+  function parseNowPlayingHref(href) {
+    const match = href.match(/\/(movies|shows)\/([^\/?#]+)(?:\/seasons\/(\d+)\/episodes\/(\d+))?/);
+    if (!match) return null;
+
+    const parsed = {
+      type: match[1] === 'movies' ? 'movie' : 'show',
+      slug: decodeURIComponent(match[2])
+    };
+
+    let season = match[3];
+    let episode = match[4];
+    if (!season || !episode) {
+      const query = href.split('?')[1];
+      if (query) {
+        const params = new URLSearchParams(query);
+        season = season || params.get('season');
+        episode = episode || params.get('episode');
+      }
+    }
+    if (season && episode) {
+      parsed.season = parseInt(season, 10);
+      parsed.episode = parseInt(episode, 10);
+    }
+    return parsed;
+  }
+
+  // 集标题：官方接口支持 slug + translations=zh，一次拿整季的中英文集名，
+  // 且不需要用户 token。结果缓存在内存里，失败也不重试，避免反复刷请求。
+  function getEpisodeTitle(slug, season, number) {
+    const cached = episodeTitleCache.get(`${slug}:${season}:${number}`);
+    if (cached === undefined) {
+      resolveEpisodeTitles(slug, season);
+      return '';
+    }
+    return cached.zh || cached.en || '';
+  }
+
+  async function resolveEpisodeTitles(slug, season) {
+    const seasonKey = `${slug}:${season}`;
+    if (attemptedEpisodeSeasons.has(seasonKey)) return;
+    attemptedEpisodeSeasons.add(seasonKey);
+
+    try {
+      const res = await (window.fetch || fetch)(
+        `https://api.trakt.tv/shows/${encodeURIComponent(slug)}/seasons/${season}/episodes?translations=zh`,
+        {
+          headers: {
+            'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
+            'trakt-api-version': API_VERSION,
+            'accept': 'application/json'
+          }
+        }
+      );
+      if (res.ok) {
+        const list = await res.json();
+        if (Array.isArray(list)) {
+          for (const episode of list) {
+            if (!episode || typeof episode.number !== 'number') continue;
+            const translations = (episode.translations || []).filter(
+              (item) => item && item.title && String(item.language || '').toLowerCase().startsWith('zh')
+            );
+            const zh = translations.find((item) => String(item.country || '').toLowerCase() === 'cn')
+              || translations[0];
+            episodeTitleCache.set(`${slug}:${season}:${episode.number}`, {
+              en: episode.title || '',
+              zh: (zh && zh.title) || ''
+            });
+          }
+        }
+      }
+    } catch (e) {} finally {
+      schedule();
+    }
+  }
+
+  // 电影/剧：整行就是标题；单集：「第 x 季 · 第 y 集 - 剧名」只替换后半段。
+  function localizedNowPlayingText(source, enTitle, zhTitle) {
+    if (!source || !zhTitle) return '';
+    if (enTitle && source === enTitle) return zhTitle;
+    if (enTitle && source.includes(enTitle)) return source.replace(enTitle, zhTitle);
+
+    const sep = source.lastIndexOf(' - ');
+    if (sep > -1) {
+      const tail = source.slice(sep + 3);
+      if (tail && !ZH_REGEX.test(tail)) return source.slice(0, sep + 3) + zhTitle;
+    }
+    return '';
+  }
+
   function scan() {
     document.querySelectorAll('.trakt-now-playing-container .trakt-helper-poster-title').forEach((element) => {
       element.remove();
     });
+    localizeNowPlaying();
     document.querySelectorAll(CARD_SELECTOR).forEach((card) => {
       scanCard(card);
     });
