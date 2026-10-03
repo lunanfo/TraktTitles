@@ -41,3 +41,15 @@
 .trakt-helper-cover-badge {
     transform: translateY(-6px) !important;
 }
+
+/* 「正在播放」浮层：季集行是本脚本插入的，让它贴紧剧名成为一个标题块，
+   并与下面的「剩余/结束」拉开一点，形成 标签 → 标题组 → 时间信息 的层级。
+   选择器全部锁在 .trakt-now-playing-container 里，只影响这一个浮层。
+   官方原有的行间距是 --gap-xxs(4px)，这里 -2px 即变成 2px。 */
+.trakt-now-playing-container .trakt-helper-now-playing-episode {
+    margin-top: -2px !important;
+}
+
+.trakt-now-playing-content:has(.trakt-helper-now-playing-episode) .trakt-now-playing-progress {
+    margin-top: 2px !important;
+}

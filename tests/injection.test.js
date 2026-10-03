@@ -337,6 +337,13 @@ async function runNowPlayingTest() {
     'now playing end time is untouched');
   assert.strictEqual(doc.querySelectorAll('.trakt-now-playing-container .trakt-helper-poster-title').length, 0,
     'no extra title node is injected into the now playing toast');
+  assert.strictEqual(doc.querySelector('.trakt-helper-now-playing-episode'), null,
+    'movies get no second line');
+  assert.strictEqual(
+    doc.querySelector('.trakt-now-playing-content:has(.trakt-helper-now-playing-episode)'),
+    null,
+    'movie toast never matches the episode-only spacing rule'
+  );
 }
 
 async function runNowPlayingEpisodeTest() {
@@ -374,12 +381,16 @@ async function runNowPlayingEpisodeTest() {
   dom.window.eval(source);
   await wait(180);
 
-  const title = dom.window.document.querySelector('.trakt-now-playing-content > span.bold.ellipsis');
-  assert.strictEqual(
-    title.textContent,
-    'S2•E1 - 暗夜情报员',
-    'now playing episode compacts the season/episode label and swaps the show name'
-  );
+  const doc = dom.window.document;
+  const title = doc.querySelector('.trakt-now-playing-content > span.bold.ellipsis');
+  assert.strictEqual(title.textContent, '暗夜情报员', 'show name sits on the first line');
+  const episodeLine = doc.querySelector('.trakt-now-playing-content > .trakt-helper-now-playing-episode');
+  assert(episodeLine, 'episodes get a dedicated second line');
+  assert.strictEqual(episodeLine.textContent, 'S2 • E1');
+  assert(episodeLine.classList.contains('small') && episodeLine.classList.contains('secondary'),
+    'second line reuses the app small/secondary styles');
+  assert(doc.querySelector('.trakt-now-playing-content:has(.trakt-helper-now-playing-episode)'),
+    'episode toast matches the episode-only spacing rule');
 }
 
 async function runNowPlayingEpisodeTitleTest() {
@@ -443,10 +454,11 @@ async function runNowPlayingEpisodeTitleTest() {
 
   const doc = dom.window.document;
   const title = doc.querySelector('.trakt-now-playing-content > span.bold.ellipsis');
+  assert.strictEqual(title.textContent, '绅士们', 'show name sits on the first line');
   assert.strictEqual(
-    title.textContent,
-    'S2•E5 - 绅士们 - “贝辛斯托克郊区的一条主干道”',
-    'now playing episode compacts the season/episode label and appends the official Chinese episode title'
+    doc.querySelector('.trakt-now-playing-content > .trakt-helper-now-playing-episode').textContent,
+    'S2 • E5 - 贝辛斯托克郊区的一条主干道',
+    'second line is SxEy plus the official Chinese episode title'
   );
   assert(
     requested.some((url) => url.includes('/shows/the-gentlemen/seasons/2/episodes?translations=zh')),
@@ -459,6 +471,63 @@ async function runNowPlayingEpisodeTitleTest() {
   );
 }
 
+async function runNowPlayingSwitchToMovieTest() {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div class="trakt-now-playing-container">
+      <div class="trakt-card now-playing-card">
+        <a class="np-link" href="/shows/the-night-agent/seasons/2/episodes/1" aria-label="第 2 季 · 第 1 集 - The Night Agent海报">
+          <div class="trakt-card-cover"><img src="now-playing.jpg"></div>
+        </a>
+      </div>
+      <div class="trakt-now-playing-content svelte-11wjdk4">
+        <div class="trakt-now-playing-header svelte-11wjdk4"><span class="secondary small">正在播放</span></div>
+        <span class="bold ellipsis">第 2 季 · 第 1 集 - The Night Agent</span>
+        <div class="trakt-now-playing-progress svelte-11wjdk4">
+          <div class="trakt-now-playing-info svelte-11wjdk4">
+            <span class="trakt-now-playing-remaining ellipsis small svelte-11wjdk4">剩余 43分钟</span>
+            <span class="trakt-now-playing-ends-at ellipsis small svelte-11wjdk4">结束于 13:09</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body></html>`, {
+    url: 'https://app.trakt.tv/home',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true
+  });
+
+  dom.window.sessionStorage.setItem('trakt_media_info_cache', JSON.stringify({
+    'show:the-night-agent': { type: 'show', slug: 'the-night-agent', id: 170228, title: 'The Night Agent' },
+    'movie:unabomber-2026': { type: 'movie', slug: 'unabomber-2026', id: 1224034, title: 'UNABOMBER' }
+  }));
+  dom.window.sessionStorage.setItem('trakt_intl_zh_cache', JSON.stringify({
+    'show:170228': '暗夜情报员',
+    'movie:1224034': '大学炸弹客'
+  }));
+
+  dom.window.eval(source);
+  await wait(200);
+
+  const doc = dom.window.document;
+  assert.strictEqual(doc.querySelector('.trakt-helper-now-playing-episode').textContent, 'S2 • E1',
+    'episode shows the second line first');
+
+  // 模拟 App 把浮层内容换成一部电影（改链接 + 改标题，触发 MutationObserver）
+  doc.querySelector('.np-link').setAttribute('href', '/movies/unabomber-2026');
+  doc.querySelector('.trakt-now-playing-content > span.bold.ellipsis').textContent = 'UNABOMBER';
+  await wait(200);
+
+  const title = doc.querySelector('.trakt-now-playing-content > span.bold.ellipsis');
+  assert.strictEqual(title.textContent, '大学炸弹客', 'movie title is localized after the switch');
+  assert.strictEqual(doc.querySelector('.trakt-helper-now-playing-episode'), null,
+    'stale episode line is removed when the toast switches to a movie');
+  assert.strictEqual(
+    doc.querySelector('.trakt-now-playing-content:has(.trakt-helper-now-playing-episode)'),
+    null,
+    'movie toast does not match the episode-only spacing rule after the switch'
+  );
+}
+
 (async () => {
   await runSearchTest();
   await runSmartListTest();
@@ -468,6 +537,7 @@ async function runNowPlayingEpisodeTitleTest() {
   await runNowPlayingTest();
   await runNowPlayingEpisodeTest();
   await runNowPlayingEpisodeTitleTest();
+  await runNowPlayingSwitchToMovieTest();
   console.log(`[${process.env.TARGET || 'extension'}] RESULT: ALL PASS`);
   process.exit(0);
 })();

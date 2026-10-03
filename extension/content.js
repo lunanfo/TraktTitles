@@ -512,30 +512,22 @@
   }
 
   // 「正在播放」浮层（.trakt-now-playing-container）。
-  // 标题规则和官方一致：电影/剧是整行标题，单集是「第 x 季·第 y 集 - 剧名」。
-  // 本脚本：剧名换成官方中文；单集再往后补一个官方中文集标题。
+  // 第一行显示剧名/电影名（官方中文优先），单集在下面单独加一行「S1•E1-集标题」。
   // 其余内容（剩余时间、结束时间、进度条、海报）一律不动，
   // 数据复用已有的 mediaInfoCache / translationCache / resolveSlug / queueBulkTranslation。
   function localizeNowPlaying() {
     const container = document.querySelector('.trakt-now-playing-container');
     if (!container) return;
 
-    const titleEl = container.querySelector('.trakt-now-playing-content > span.bold.ellipsis');
+    const content = container.querySelector('.trakt-now-playing-content');
+    if (!content) return;
+    const titleEl = content.querySelector(':scope > span.bold.ellipsis');
     if (!titleEl) return;
 
     const mediaLink = container.querySelector('a[href*="/shows/"], a[href*="/movies/"]');
     if (!mediaLink) return;
     const parsed = parseNowPlayingHref(mediaLink.getAttribute('href') || '');
     if (!parsed) return;
-
-    const current = (titleEl.textContent || '').trim();
-    if (!current) return;
-    // 应用重新渲染出新标题（换片/换集）时重新记录原文；本脚本写入过的文本不算。
-    if (current !== titleEl.dataset.traktZhTitle && current !== titleEl.dataset.traktSourceTitle) {
-      titleEl.dataset.traktSourceTitle = current;
-    }
-    const source = titleEl.dataset.traktSourceTitle;
-    if (!source) return;
 
     const mediaInfo = mediaInfoCache.get(`${parsed.type}:${parsed.slug}`);
     if (!mediaInfo) {
@@ -549,31 +541,37 @@
       return;
     }
 
-    let next = localizedNowPlayingText(source, mediaInfo.title, translationCache.get(transKey)) || source;
-
-    if (parsed.season && parsed.episode) {
-      // 「第 2 季 • 第 5 集 - 剧名」→「S2•E5 - 剧名」，整行短很多
-      next = compactSeasonEpisodeLabel(next, parsed.season, parsed.episode);
-
-      // 再往后补 - “集标题”
-      const episodeTitle = getEpisodeTitle(parsed.slug, parsed.season, parsed.episode);
-      if (episodeTitle) next += ` - “${episodeTitle}”`;
+    // 第一行：剧名 / 电影名（没有官方中文就保持英文原名）
+    const title = translationCache.get(transKey) || mediaInfo.title || '';
+    if (title && titleEl.textContent !== title) {
+      titleEl.textContent = title;
     }
 
-    if (next === current) return;
-    titleEl.textContent = next;
-    titleEl.dataset.traktZhTitle = next;
+    // 第二行：只有单集才有，形如 S2•E5-贝辛斯托克郊区的一条主干道
+    const episodeLine = parsed.season && parsed.episode
+      ? nowPlayingEpisodeLine(parsed.slug, parsed.season, parsed.episode)
+      : '';
+    let subtitleEl = content.querySelector('.trakt-helper-now-playing-episode');
+
+    if (episodeLine) {
+      if (!subtitleEl) {
+        subtitleEl = document.createElement('span');
+        subtitleEl.className = 'small secondary ellipsis trakt-helper-now-playing-episode';
+        titleEl.insertAdjacentElement('afterend', subtitleEl);
+      }
+      if (subtitleEl.textContent !== episodeLine) {
+        subtitleEl.textContent = episodeLine;
+      }
+    } else if (subtitleEl) {
+      subtitleEl.remove();
+    }
   }
 
-  // 把官方的季集标签（中文「第 x 季 • 第 y 集」/ 英文 SxxExx）压成 Sx•Ey。
-  // 只重写第一个 " - " 之前的那一段，后面（剧名、集标题）保持原样。
-  function compactSeasonEpisodeLabel(source, season, episode) {
-    const sep = source.indexOf(' - ');
-    if (sep === -1) return source;
-
-    const label = source.slice(0, sep);
-    if (!/季|集|Season|Episode|S[0-9]+E[0-9]+/i.test(label)) return source;
-    return `S${season}•E${episode}${source.slice(sep)}`;
+  // 季集标签跟官方 App 同款写法：S1 • E1，拿到中文集名再接 " - 剧集名"
+  function nowPlayingEpisodeLine(slug, season, episode) {
+    const episodeTitle = getEpisodeTitle(slug, season, episode);
+    const label = `S${season} • E${episode}`;
+    return episodeTitle ? `${label} - ${episodeTitle}` : label;
   }
 
   // 新版 `/shows/<slug>/seasons/<s>/episodes/<e>` 和旧版
@@ -651,20 +649,6 @@
     } catch (e) {} finally {
       schedule();
     }
-  }
-
-  // 电影/剧：整行就是标题；单集：「第 x 季 · 第 y 集 - 剧名」只替换后半段。
-  function localizedNowPlayingText(source, enTitle, zhTitle) {
-    if (!source || !zhTitle) return '';
-    if (enTitle && source === enTitle) return zhTitle;
-    if (enTitle && source.includes(enTitle)) return source.replace(enTitle, zhTitle);
-
-    const sep = source.lastIndexOf(' - ');
-    if (sep > -1) {
-      const tail = source.slice(sep + 3);
-      if (tail && !ZH_REGEX.test(tail)) return source.slice(0, sep + 3) + zhTitle;
-    }
-    return '';
   }
 
   function scan() {
