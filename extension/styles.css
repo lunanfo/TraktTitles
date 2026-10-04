@@ -53,3 +53,20 @@
 .trakt-now-playing-content:has(.trakt-helper-now-playing-episode) .trakt-now-playing-progress {
     margin-top: 2px !important;
 }
+
+/* 暗色模式下季集行太淡：官方次级文字是 --shade-300(oklch 67%)，而 toast 背景是
+   半透明毛玻璃，叠在明亮的海报上就更糊。这里只提亮这一行，剧名是 --shade-10(99%)。
+   取值可调（数字越大越亮）：
+     --shade-200  78%    最接近官方观感
+     --shade-100  85.5%  折中，层级仍清晰  ← 当前
+     --shade-50   95.5%  最清楚，但几乎和剧名一样亮
+   亮色模式（--shade-800）以及浮层里其它元素一律保持官方原值，不做改动。 */
+[data-theme='dark'] .trakt-now-playing-container .trakt-helper-now-playing-episode {
+    color: var(--shade-100, var(--color-text-secondary)) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+    [data-theme='system'] .trakt-now-playing-container .trakt-helper-now-playing-episode {
+        color: var(--shade-100, var(--color-text-secondary)) !important;
+    }
+}
