@@ -53,7 +53,7 @@
           translationCache.set(k, v);
         }
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   function saveStoredCache() {
@@ -68,14 +68,14 @@
         translationCache.forEach((v, k) => { intlObj[k] = v; });
         sessionStorage.setItem('trakt_intl_zh_cache', JSON.stringify(intlObj));
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   function getAuthToken() {
     if (capturedAuthToken) return capturedAuthToken;
     const storages = [];
-    try { if (window.localStorage) storages.push(window.localStorage); } catch (e) {}
-    try { if (window.sessionStorage) storages.push(window.sessionStorage); } catch (e) {}
+    try { if (window.localStorage) storages.push(window.localStorage); } catch (e) { }
+    try { if (window.sessionStorage) storages.push(window.sessionStorage); } catch (e) { }
 
     for (const storage of storages) {
       try {
@@ -99,7 +99,7 @@
             }
           }
         }
-      } catch (e) {}
+      } catch (e) { }
     }
     return null;
   }
@@ -174,7 +174,7 @@
           }
           if (key) capturedApiKey = key;
         }
-      } catch (e) {}
+      } catch (e) { }
 
       const response = await origFetch.apply(this, args);
 
@@ -184,9 +184,9 @@
           response.clone().json().then((data) => {
             extractMediaFromPayload(data);
             schedule();
-          }).catch(() => {});
+          }).catch(() => { });
         }
-      } catch (e) {}
+      } catch (e) { }
 
       return response;
     };
@@ -217,7 +217,7 @@
           schedule();
         }
       }
-    } catch (e) {} finally {
+    } catch (e) { } finally {
       resolvingSlugs.delete(key);
     }
   }
@@ -283,7 +283,7 @@
           schedule();
           return;
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     // Fallback: public single translations if no token or bulk failed
@@ -324,7 +324,7 @@
     if (quoted) title = quoted[1].trim();
 
     title = title
-      .replace(/^\s*\d+(?:\.\d+)?\s*/, '')
+      //.replace(/^\s*\d+(?:\.\d+)?\s*/, '')
       .replace(/\s*(?:海报|poster|图片|image)\s*$/i, '')
       .replace(/\s*(?:在 Trakt 中播放|在 Trakt 中打开).*$/i, '')
       .replace(/^['“\"]|['”\"]$/g, '')
@@ -646,7 +646,7 @@
           }
         }
       }
-    } catch (e) {} finally {
+    } catch (e) { } finally {
       schedule();
     }
   }
