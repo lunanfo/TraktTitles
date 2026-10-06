@@ -641,6 +641,14 @@ async function runNowPlayingEpisodeTest() {
   assert.strictEqual(episodeLine.textContent, 'S2 • E1');
   assert(episodeLine.classList.contains('small') && episodeLine.classList.contains('secondary'),
     'second line reuses the app small/secondary styles');
+  assert(
+    /\.trakt-now-playing-container \.trakt-helper-now-playing-episode\s*\{[^}]*font-weight:\s*500/.test(styleSource),
+    'the episode line matches the app episode-title weight (500) so it does not read as dim'
+  );
+  assert(
+    !/\.trakt-helper-now-playing-episode[^{};]*\{[^}]*color\s*:/.test(styleSource),
+    'the episode line keeps the app colour (same as the page card) instead of overriding it'
+  );
   assert(doc.querySelector('.trakt-now-playing-content:has(.trakt-helper-now-playing-episode)'),
     'episode toast matches the episode-only spacing rule');
 }

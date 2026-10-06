@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Trakt Titles
 // @namespace    trakt-titles
-// @version      1.1.5
+// @version      1.1.6
 // @description  Restores missing titles on Trakt poster-only cards.
 // @author       lunanfo
 // @homepageURL  https://github.com/lunanfo/TraktTitles
@@ -76,30 +76,19 @@
 /* 「正在播放」浮层：季集行是本脚本插入的，让它贴紧剧名成为一个标题块，
    并与下面的「剩余/结束」拉开一点，形成 标签 → 标题组 → 时间信息 的层级。
    选择器全部锁在 .trakt-now-playing-container 里，只影响这一个浮层。
-   官方原有的行间距是 --gap-xxs(4px)，这里 -2px 即变成 2px。 */
+   官方原有的行间距是 --gap-xxs(4px)，这里 -2px 即变成 2px。
+
+   颜色故意不覆盖：网页卡片里的集标题是 .trakt-card-subtitle，
+   即 var(--color-text-secondary) + 字重 500 + 12px；我们这行同样用
+   small/secondary 类，所以暗色 67%、亮色 shade-800，与主页面那行完全一致。
+   这里只补官方有、我们缺的 500 字重。（早先为毛玻璃提亮的 shade-100 已按要求撤掉。） */
 .trakt-now-playing-container .trakt-helper-now-playing-episode {
     margin-top: -2px !important;
+    font-weight: 500 !important;
 }
 
 .trakt-now-playing-content:has(.trakt-helper-now-playing-episode) .trakt-now-playing-progress {
     margin-top: 2px !important;
-}
-
-/* 暗色模式下季集行太淡：官方次级文字是 --shade-300(oklch 67%)，而 toast 背景是
-   半透明毛玻璃，叠在明亮的海报上就更糊。这里只提亮这一行，剧名是 --shade-10(99%)。
-   取值可调（数字越大越亮）：
-     --shade-200  78%    最接近官方观感
-     --shade-100  85.5%  折中，层级仍清晰  ← 当前
-     --shade-50   95.5%  最清楚，但几乎和剧名一样亮
-   亮色模式（--shade-800）以及浮层里其它元素一律保持官方原值，不做改动。 */
-[data-theme='dark'] .trakt-now-playing-container .trakt-helper-now-playing-episode {
-    color: var(--shade-100, var(--color-text-secondary)) !important;
-}
-
-@media (prefers-color-scheme: dark) {
-    [data-theme='system'] .trakt-now-playing-container .trakt-helper-now-playing-episode {
-        color: var(--shade-100, var(--color-text-secondary)) !important;
-    }
 }
 `;
   (document.head || document.documentElement).appendChild(style);
