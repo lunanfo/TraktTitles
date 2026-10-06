@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Trakt Titles
 // @namespace    trakt-titles
-// @version      1.1.4
+// @version      1.1.5
 // @description  Restores missing titles on Trakt poster-only cards.
 // @author       lunanfo
 // @homepageURL  https://github.com/lunanfo/TraktTitles
@@ -56,6 +56,17 @@
     white-space: nowrap !important;
 }
 
+/* Discover 页（/discover/trending 等）的原名行要和官方那一行完全一致。
+   官方那行是没有颜色类的裸 <p>（实测文字像素 ≈249，和剧名 246 一样亮），只有「科幻」那种
+   类型行才是次级色（≈143）。所以这里把上面那条给智能列表写的次级色 + 收紧间距全部复位：
+   颜色改成继承容器（与官方同一个父节点，天然一致），字号回到 --font-size-text。 */
+.trakt-helper-original-title.trakt-helper-discover-original-title {
+    margin: 0 !important;
+    font-size: var(--font-size-text, 1rem) !important;
+    font-weight: 400 !important;
+    color: inherit !important;
+}
+
 /* Lift the centered cover badge slightly so its card title stays on the same
    baseline as cards without a badge. */
 .trakt-helper-cover-badge {
@@ -102,12 +113,15 @@
 
   const TITLE_CLASS = 'trakt-helper-poster-title';
   const ORIGINAL_TITLE_CLASS = 'trakt-helper-original-title';
+  const DISCOVER_ORIGINAL_TITLE_CLASS = 'trakt-helper-discover-original-title';
   const CARD_SELECTOR = '.trakt-card, .mini_card, .grid-item, [data-card]';
   const EXCLUDED_SELECTOR = 'header, nav, footer, [role="navigation"], [role="menu"], [role="menubar"], .breadcrumbs, .navbar, .comments, .trakt-now-playing-container, table, tbody';
 
   const DEFAULT_API_KEY = '201dc70c5ec6af530f12f079ea1922733f6e1085ad7b02f36d8e011b75bcea7d';
   const API_VERSION = '2';
   const ZH_REGEX = /[\u4e00-\u9fa5]/;
+  // 官方 /v3/intl/bulk 每个类型最多收 100 个 id，和网页端自己的上限保持一致。
+  const BULK_ID_CAP = 100;
 
   // Caches
   const mediaInfoCache = new Map(); // `${type}:${slug}` -> { type, slug, id, title }
@@ -122,6 +136,10 @@
   let capturedApiKey = DEFAULT_API_KEY;
   let bulkTimer = null;
   let renderTimer = null;
+  // 中文名的语言/地区固定走简体：网页端自己的请求是 zh + CN，我们也不去跟它的地区走，
+  // 免得在繁体界面之外的场景混进繁体译名。
+  const INTL_LANGUAGE = 'zh';
+  const INTL_COUNTRY = 'CN';
 
   function isSmartListPage() {
     return window.location.pathname.startsWith('/lists/smart');
@@ -129,6 +147,10 @@
 
   function isSearchPage() {
     return window.location.pathname.startsWith('/search');
+  }
+
+  function isDiscoverPage() {
+    return window.location.pathname.startsWith('/discover');
   }
 
   // Load persistent cache from sessionStorage
@@ -245,6 +267,40 @@
     }
   }
 
+  // 网页端自己也会请求 /v3/intl/bulk 做「中文名覆盖」。它拿回来的正是官方译名，
+  // 直接收进缓存，我们就不用为同一批 id 再打一次接口。
+  // 只收简体的官方结果：非 zh 语言、或非 CN 地区的响应一律不写进缓存。
+  function captureBulkIntlResponse(url, data) {
+    if (!data || typeof data !== 'object') return;
+
+    try {
+      const query = String(url).split('?')[1];
+      if (query) {
+        const params = new URLSearchParams(query);
+        const language = String(params.get('language') || '').toLowerCase();
+        const country = String(params.get('country') || '').toUpperCase();
+        if (!language.startsWith('zh') || country !== INTL_COUNTRY) return;
+      }
+    } catch (e) { }
+
+    let changed = false;
+    for (const type of ['movie', 'show']) {
+      const bucket = data[type];
+      if (!bucket || typeof bucket !== 'object') continue;
+      for (const [rawId, value] of Object.entries(bucket)) {
+        const id = parseInt(rawId, 10);
+        const title = value && typeof value.title === 'string' ? value.title.trim() : '';
+        // 地区拿不到中文时接口会回落成英文原名，这种不能当成「已翻译」。
+        if (!Number.isFinite(id) || !title || !ZH_REGEX.test(title)) continue;
+        const key = `${type}:${id}`;
+        if (translationCache.get(key) === title) continue;
+        translationCache.set(key, title);
+        changed = true;
+      }
+    }
+    if (changed) saveStoredCache();
+  }
+
   function interceptFetch() {
     const origFetch = window.fetch;
     if (!origFetch || origFetch.__traktTitlesHooked) return;
@@ -278,6 +334,7 @@
         if (url && (url.includes('trakt.tv') || url.includes('/api/') || url.includes('multi_search'))) {
           response.clone().json().then((data) => {
             extractMediaFromPayload(data);
+            if (url.includes('/intl/bulk')) captureBulkIntlResponse(url, data);
             schedule();
           }).catch(() => { });
         }
@@ -332,6 +389,75 @@
     }, 60);
   }
 
+  // 官方批量接口一次最多 100 个 id/类型（Trakt 网页端自己的上限），超了就分批。
+  // 返回 `${type}:${id}` -> 中文名 的 Map；请求失败/没有 token 返回 null。
+  async function fetchBulkTitles(movieIds, showIds) {
+    const token = getAuthToken();
+    if (!token) return null;
+
+    try {
+      const params = new URLSearchParams({
+        language: INTL_LANGUAGE,
+        country: INTL_COUNTRY
+      });
+      if (movieIds.length > 0) params.set('m', movieIds.join(','));
+      if (showIds.length > 0) params.set('s', showIds.join(','));
+
+      const res = await (window.fetch || fetch)(`https://apiz.trakt.tv/v3/intl/bulk?${params.toString()}`, {
+        headers: {
+          'accept': '*/*',
+          'accept-language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+          'authorization': `Bearer ${token}`,
+          'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
+          'trakt-api-version': API_VERSION
+        }
+      });
+
+      if (!res.ok) return null;
+
+      const data = await res.json();
+      const titles = new Map();
+      for (const [type, ids] of [['movie', movieIds], ['show', showIds]]) {
+        const bucket = (data && data[type]) || {};
+        for (const id of ids) {
+          const entry = bucket[id];
+          const title = entry && typeof entry.title === 'string' ? entry.title.trim() : '';
+          // 该地区没有中文时接口会回落成英文原名，这种不算命中。
+          if (title && ZH_REGEX.test(title)) titles.set(`${type}:${id}`, title);
+        }
+      }
+      return titles;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // 单体兜底：/translations/zh 按 id 列出全部中文译名（cn/tw/hk…），
+  // 不需要用户 token，也不受地区回落影响——官方网页批量接口拿不到的那些中文名靠它补齐。
+  // 只取 country=cn 且确实有标题的条目：没简体名就保持英文原名，不拿繁体中/港/新补位。
+  async function resolveTranslationTitles(type, id) {
+    const cacheKey = `${type}:${id}`;
+    try {
+      const res = await (window.fetch || fetch)(`https://api.trakt.tv/${type}s/${id}/translations/zh`, {
+        headers: {
+          'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
+          'trakt-api-version': API_VERSION,
+          'accept': 'application/json'
+        }
+      });
+      if (!res.ok) {
+        translationCache.set(cacheKey, null);
+        return;
+      }
+      const list = await res.json();
+      const item = (Array.isArray(list) ? list : []).find((entry) =>
+        entry && entry.title && String(entry.country || '').toLowerCase() === 'cn');
+      translationCache.set(cacheKey, (item && item.title.trim()) || null);
+    } catch (e) {
+      translationCache.set(cacheKey, null);
+    }
+  }
+
   async function flushBulkTranslations() {
     const movieIds = Array.from(pendingBulkIds.movie);
     const showIds = Array.from(pendingBulkIds.show);
@@ -343,70 +469,33 @@
     movieIds.forEach((id) => inFlightIds.movie.add(id));
     showIds.forEach((id) => inFlightIds.show.add(id));
 
-    const token = getAuthToken();
-    if (token) {
-      try {
-        const params = new URLSearchParams({ language: 'zh', country: 'CN' });
-        if (movieIds.length > 0) params.set('m', movieIds.join(','));
-        if (showIds.length > 0) params.set('s', showIds.join(','));
+    const unresolved = [];
+    const chunks = Math.max(
+      Math.ceil(movieIds.length / BULK_ID_CAP),
+      Math.ceil(showIds.length / BULK_ID_CAP)
+    );
 
-        const res = await (window.fetch || fetch)(`https://apiz.trakt.tv/v3/intl/bulk?${params.toString()}`, {
-          headers: {
-            'accept': '*/*',
-            'accept-language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-            'authorization': `Bearer ${token}`,
-            'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
-            'trakt-api-version': API_VERSION
+    for (let index = 0; index < chunks; index++) {
+      const movies = movieIds.slice(index * BULK_ID_CAP, (index + 1) * BULK_ID_CAP);
+      const shows = showIds.slice(index * BULK_ID_CAP, (index + 1) * BULK_ID_CAP);
+      if (movies.length === 0 && shows.length === 0) continue;
+
+      const titles = await fetchBulkTitles(movies, shows);
+      for (const [type, ids] of [['movie', movies], ['show', shows]]) {
+        for (const id of ids) {
+          const title = titles && titles.get(`${type}:${id}`);
+          if (title) {
+            translationCache.set(`${type}:${id}`, title);
+          } else {
+            unresolved.push({ type, id });
           }
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          const moviesRes = data.movie || {};
-          const showsRes = data.show || {};
-
-          for (const id of movieIds) {
-            const zh = moviesRes[id]?.title || null;
-            translationCache.set(`movie:${id}`, zh);
-          }
-          for (const id of showIds) {
-            const zh = showsRes[id]?.title || null;
-            translationCache.set(`show:${id}`, zh);
-          }
-
-          saveStoredCache();
-          schedule();
-          return;
         }
-      } catch (e) { }
+      }
     }
 
-    // Fallback: public single translations if no token or bulk failed
-    const allIds = [
-      ...movieIds.map((id) => ({ type: 'movie', id })),
-      ...showIds.map((id) => ({ type: 'show', id }))
-    ];
-
-    await Promise.all(allIds.map(async ({ type, id }) => {
-      try {
-        const res = await (window.fetch || fetch)(`https://api.trakt.tv/${type}s/${id}/translations/zh`, {
-          headers: {
-            'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
-            'trakt-api-version': API_VERSION,
-            'accept': 'application/json'
-          }
-        });
-        if (res.ok) {
-          const list = await res.json();
-          const item = (list && list.find((t) => t.country === 'cn')) || list?.[0];
-          translationCache.set(`${type}:${id}`, item?.title || null);
-        } else {
-          translationCache.set(`${type}:${id}`, null);
-        }
-      } catch (e) {
-        translationCache.set(`${type}:${id}`, null);
-      }
-    }));
+    // 批量接口没给出中文（没有 token、请求失败、或该地区只回落成英文）时逐个补齐，
+    // 命中与未命中都会写进缓存，同一个 id 不会反复请求。
+    await Promise.all(unresolved.map(({ type, id }) => resolveTranslationTitles(type, id)));
 
     saveStoredCache();
     schedule();
@@ -513,6 +602,117 @@
     }
   }
 
+  // Discover 页（/discover/trending、/discover/anticipated、/discover/popular …）
+  // 官方网页本来就会用 /v3/intl/bulk 覆盖剧名，但只有「批量请求成功」且「该 id 在所用地区
+  // 有中文」时才生效：一旦请求失败/被取消/回落成英文，卡片就停在英文，直到下一次覆盖。
+  // 这里在英文卡片上补回官方中文名，并照抄官方的「中文 / (English)」两行排版；
+  // 官方已经写成中文时我们什么都不做，避免两边打架。
+  // 海报地址里本来就带着 trakt id：media.trakt.tv/images/shows/000/157/599/… → 157599。
+  // Discover 列表经常是网页端从 IndexedDB 里恢复出来的，那次 /discover 请求根本不会再发，
+  // 我们也就抓不到 id；这时直接从海报地址推出来，省掉一次 /shows/{slug} 请求。
+  function recordMediaFromPoster(card, type, slug) {
+    const cached = mediaInfoCache.get(`${type}:${slug}`);
+    if (cached) return cached;
+
+    const image = card.querySelector('img[src*="media.trakt.tv/images/"]');
+    const src = image ? image.getAttribute('src') || '' : '';
+    const match = src.match(/\/images\/(shows|movies)\/((?:\d{3}\/)+)/);
+    if (!match) return null;
+
+    const id = parseInt(match[2].replace(/\//g, ''), 10);
+    if (!Number.isFinite(id)) return null;
+
+    recordMedia(type, slug, id, '');
+    return mediaInfoCache.get(`${type}:${slug}`) || null;
+  }
+
+  function handleDiscoverTitledCard(card, titleEl, type, slug) {
+    const currentTitle = titleEl.textContent.trim();
+    const localizedByUs = titleEl.dataset.traktLocalized === '1';
+
+    if (!ZH_REGEX.test(currentTitle)) {
+      titleEl.dataset.originalTitle = currentTitle;
+    }
+    const originalTitle = titleEl.dataset.originalTitle || currentTitle;
+    if (!originalTitle) return;
+
+    // 中文名已经在位：如果是我们写上去的，保证原名行跟着；
+    // 如果是官方自己渲染的，就完全交给官方，只清掉我们的兜底行。
+    if (ZH_REGEX.test(currentTitle)) {
+      if (localizedByUs) {
+        syncDiscoverOriginalTitleLine(card, titleEl, originalTitle);
+      } else {
+        removeHelperOriginalTitle(card);
+      }
+      return;
+    }
+
+    const mediaInfo = mediaInfoCache.get(`${type}:${slug}`) || recordMediaFromPoster(card, type, slug);
+    if (!mediaInfo) {
+      resolveSlug(type, slug);
+      return;
+    }
+
+    const transKey = `${type}:${mediaInfo.id}`;
+    if (!translationCache.has(transKey)) {
+      queueBulkTranslation(type, mediaInfo.id);
+      return;
+    }
+
+    const zhTitle = translationCache.get(transKey);
+    if (zhTitle && zhTitle !== originalTitle) {
+      if (currentTitle !== zhTitle) {
+        titleEl.textContent = zhTitle;
+        titleEl.title = zhTitle;
+      }
+      titleEl.dataset.traktLocalized = '1';
+      syncDiscoverOriginalTitleLine(card, titleEl, originalTitle);
+      return;
+    }
+
+    // 确实没有官方中文名：保持官方英文渲染。
+    if (currentTitle !== originalTitle) {
+      titleEl.textContent = originalTitle;
+      titleEl.title = originalTitle;
+    }
+    removeHelperOriginalTitle(card);
+  }
+
+  // 官方自己渲染原名用的是 <p class="secondary ellipsis">(English)</p>，
+  // 兜底行沿用同一组类名，官方行一出现就让位，避免出现两行原名。
+  function syncDiscoverOriginalTitleLine(card, titleEl, originalTitle) {
+    const label = `(${originalTitle})`;
+    const container = titleEl.parentElement;
+    const nativeLine = container
+      ? Array.from(container.children).find((element) =>
+        element !== titleEl &&
+        element.tagName === 'P' &&
+        !element.classList.contains(ORIGINAL_TITLE_CLASS) &&
+        !element.classList.contains('trakt-card-title') &&
+        element.textContent.trim() === label)
+      : null;
+
+    const helperLine = card.querySelector(`.${ORIGINAL_TITLE_CLASS}`);
+    if (nativeLine) {
+      if (helperLine) helperLine.remove();
+      return;
+    }
+    if (helperLine) {
+      if (helperLine.textContent.trim() !== label) helperLine.textContent = label;
+      return;
+    }
+
+    const node = document.createElement('p');
+    node.className = `ellipsis ${ORIGINAL_TITLE_CLASS} ${DISCOVER_ORIGINAL_TITLE_CLASS}`;
+    node.textContent = label;
+    titleEl.insertAdjacentElement('afterend', node);
+  }
+
+  function removeHelperOriginalTitle(card) {
+    const helperLine = card.querySelector(`.${ORIGINAL_TITLE_CLASS}`);
+    if (helperLine) helperLine.remove();
+  }
+
   function handlePosterCardTranslation(card, titleNode, type, slug) {
     const mediaKey = `${type}:${slug}`;
     if (!titleNode.dataset.originalTitle) {
@@ -577,13 +777,20 @@
 
     const isSmart = isSmartListPage();
     const isSearch = isSearchPage();
+    const isDiscover = isDiscoverPage();
+    const isEpisodeCard = /\/seasons\/\d+\/episodes\/\d+/.test(href);
 
     const nativeTitleEl = card.querySelector(`.trakt-card-title:not(.${TITLE_CLASS})`);
 
-    // 1. 卡片本身已有原生标题元素（如智能列表详情网格页 /lists/smart/view/:slug）
+    // 1. 卡片本身已有原生标题元素（如智能列表详情网格页 /lists/smart/view/:slug、
+    //    Discover 页 /discover/trending 等）
     if (nativeTitleEl) {
       if (isSmart) {
         handleSmartListTitledCard(card, nativeTitleEl, type, slug);
+      } else if (isDiscover && !isEpisodeCard) {
+        // /discover/releases 的剧集卡片：标题行是剧名、副标题行才是集名，
+        // 官方那层只覆盖集名，这里不碰，免得凭空多出一行原名。
+        handleDiscoverTitledCard(card, nativeTitleEl, type, slug);
       }
       return;
     }
@@ -793,10 +1000,25 @@
   interceptFetch();
 
   const observer = new MutationObserver(schedule);
+
+  // 网页端（Svelte）改写标题时是直接改文本节点，只会触发 characterData，
+  // childList 观察器看不到。单独盯一眼标题文本：官方把中文退回英文时马上补回来。
+  const titleObserver = new MutationObserver((records) => {
+    for (const record of records) {
+      const target = record.target;
+      const element = target && target.nodeType === 3 ? target.parentElement : target;
+      if (element && element.classList && element.classList.contains('trakt-card-title')) {
+        schedule();
+        return;
+      }
+    }
+  });
+
   const start = () => {
     const root = document.documentElement || document.body;
     if (!root) return setTimeout(start, 20);
     observer.observe(root, { childList: true, subtree: true });
+    titleObserver.observe(root, { characterData: true, subtree: true });
     scan();
   };
 

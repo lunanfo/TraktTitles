@@ -8,6 +8,10 @@ const target = process.env.TARGET === 'userscript'
   ? path.join(root, 'userscript/TraktTitles.user.js')
   : path.join(root, 'extension/content.js');
 const source = fs.readFileSync(target, 'utf8');
+// 油猴脚本把 styles.css 内联在同一个文件里，扩展则是独立文件。
+const styleSource = process.env.TARGET === 'userscript'
+  ? source
+  : fs.readFileSync(path.join(root, 'extension/styles.css'), 'utf8');
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -290,6 +294,254 @@ async function runLivePosterResolveTest() {
   assert.strictEqual(runnerSub, null, 'Poster card should not have separate subtitle line');
 }
 
+async function runDiscoverTitleTest() {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div class="trakt-card trakt-summary-card lanterns-card">
+      <div class="trakt-card-content">
+        <a class="trakt-link" href="/shows/lanterns">
+          <div class="trakt-summary-poster"><div class="trakt-card-cover"><img src="lanterns.jpg" alt="Poster for Lanterns"></div></div>
+          <div class="trakt-summary-card-details">
+            <div class="trakt-summary-card-titles">
+              <p class="trakt-card-title ellipsis">Lanterns</p>
+              <p class="trakt-card-subtitle small ellipsis secondary">科幻</p>
+            </div>
+            <div class="trakt-summary-card-tags"><p class="bold">2.3万</p></div>
+          </div>
+        </a>
+      </div>
+    </div>
+    <div class="trakt-card trakt-summary-card spider-card">
+      <div class="trakt-card-content">
+        <a class="trakt-link" href="/movies/spider-man-brand-new-day-2026">
+          <div class="trakt-summary-poster"><div class="trakt-card-cover"><img src="spider.jpg" alt="Poster for 蜘蛛侠：崭新之日"></div></div>
+          <div class="trakt-summary-card-details">
+            <div class="trakt-summary-card-titles">
+              <p class="trakt-card-title ellipsis">蜘蛛侠：崭新之日</p>
+              <p class="secondary ellipsis">(Spider-Man: Brand New Day)</p>
+              <p class="trakt-card-subtitle small ellipsis secondary">科幻</p>
+            </div>
+          </div>
+        </a>
+      </div>
+    </div>
+    <div class="trakt-card trakt-summary-card marshals-card">
+      <div class="trakt-card-content">
+        <a class="trakt-link" href="/shows/marshals">
+          <div class="trakt-summary-poster"><div class="trakt-card-cover"><img src="marshals.jpg" alt="Poster for Marshals"></div></div>
+          <div class="trakt-summary-card-details">
+            <div class="trakt-summary-card-titles">
+              <p class="trakt-card-title ellipsis">Marshals</p>
+              <p class="trakt-card-subtitle small ellipsis secondary">剧情</p>
+            </div>
+          </div>
+        </a>
+      </div>
+    </div>
+  </body></html>`, {
+    url: 'https://app.trakt.tv/discover/trending',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true
+  });
+
+  dom.window.sessionStorage.setItem('trakt_media_info_cache', JSON.stringify({
+    'show:lanterns': { type: 'show', slug: 'lanterns', id: 157599, title: 'Lanterns' },
+    'show:marshals': { type: 'show', slug: 'marshals', id: 284855, title: 'Marshals' },
+    'movie:spider-man-brand-new-day-2026': {
+      type: 'movie',
+      slug: 'spider-man-brand-new-day-2026',
+      id: 905132,
+      title: 'Spider-Man: Brand New Day'
+    }
+  }));
+  dom.window.sessionStorage.setItem('trakt_intl_zh_cache', JSON.stringify({
+    'show:157599': '绿灯军团',
+    'show:284855': null,
+    'movie:905132': '蜘蛛侠：崭新之日'
+  }));
+
+  dom.window.eval(source);
+  await wait(200);
+
+  const doc = dom.window.document;
+
+  // 官方批量翻译没生效的英文卡片：补回官方中文名 + 官方同款原名行
+  const lanternsTitle = doc.querySelector('.lanterns-card .trakt-card-title');
+  assert.strictEqual(lanternsTitle.textContent, '绿灯军团',
+    'discover card falls back to the official Chinese title');
+  const lanternsOriginal = doc.querySelector('.lanterns-card .trakt-helper-original-title');
+  assert(lanternsOriginal, 'discover card gets the (Original) line back');
+  assert.strictEqual(lanternsOriginal.textContent, '(Lanterns)');
+  assert(lanternsOriginal.classList.contains('ellipsis'), 'the (Original) line keeps the app its ellipsis class');
+  assert(!lanternsOriginal.classList.contains('secondary'),
+    'the (Original) line must not use the secondary colour: the app renders it as bright as the title');
+  assert.strictEqual(lanternsTitle.nextElementSibling, lanternsOriginal,
+    'the (Original) line sits directly under the title, above the genre line');
+  assert.strictEqual(lanternsOriginal.nextElementSibling.textContent, '科幻',
+    'the genre line is left untouched underneath');
+  assert(
+    /\.trakt-helper-original-title\.trakt-helper-discover-original-title\s*\{[^}]*color:\s*inherit/.test(styleSource),
+    'discover (Original) line inherits the title colour instead of the dim secondary one'
+  );
+
+  // 官方已经渲染成中文的卡片：一动不动，也不重复加原名行
+  const spiderTitle = doc.querySelector('.spider-card .trakt-card-title');
+  assert.strictEqual(spiderTitle.textContent, '蜘蛛侠：崭新之日', 'official Chinese title is left alone');
+  assert.strictEqual(doc.querySelectorAll('.spider-card .trakt-helper-original-title').length, 0,
+    'no duplicate (Original) line when the app already renders one');
+  assert.strictEqual(
+    doc.querySelectorAll('.spider-card .trakt-summary-card-titles > p').length,
+    3,
+    'the official title group keeps exactly its own three lines'
+  );
+
+  // 官方没有中文名的卡片：保持英文，不注入任何东西
+  const marshalsCard = doc.querySelector('.marshals-card');
+  assert.strictEqual(marshalsCard.querySelector('.trakt-card-title').textContent, 'Marshals',
+    'titles without an official Chinese name stay English');
+  assert.strictEqual(marshalsCard.querySelector('.trakt-helper-original-title'), null,
+    'no (Original) line is added without a Chinese title');
+
+  // 官方稍后把标题写回英文（Svelte 直接改文本节点）：必须马上补回中文
+  lanternsTitle.firstChild.nodeValue = 'Lanterns';
+  await wait(220);
+  assert.strictEqual(doc.querySelector('.lanterns-card .trakt-card-title').textContent, '绿灯军团',
+    'a later English rewrite by the app is localized again');
+  assert.strictEqual(doc.querySelectorAll('.lanterns-card .trakt-helper-original-title').length, 1,
+    'the (Original) line is not duplicated by the re-localization');
+}
+
+async function runDiscoverTranslationFetchTest() {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div class="trakt-card trakt-summary-card lanterns-card">
+      <div class="trakt-card-content">
+        <a class="trakt-link" href="/shows/lanterns">
+          <div class="trakt-summary-poster"><div class="trakt-card-cover"><img src="https://media.trakt.tv/images/shows/000/157/599/posters/thumb/1fdc413e93.jpg.webp" alt="Poster for Lanterns"></div></div>
+          <div class="trakt-summary-card-details">
+            <div class="trakt-summary-card-titles">
+              <p class="trakt-card-title ellipsis">Lanterns</p>
+              <p class="trakt-card-subtitle small ellipsis secondary">科幻</p>
+            </div>
+          </div>
+        </a>
+      </div>
+    </div>
+    <div class="trakt-card trakt-summary-card ted-lasso-card">
+      <div class="trakt-card-content">
+        <a class="trakt-link" href="/shows/ted-lasso">
+          <div class="trakt-summary-poster"><div class="trakt-card-cover"><img src="https://media.trakt.tv/images/shows/000/162/639/posters/thumb/abc.jpg.webp" alt="Poster for Ted Lasso"></div></div>
+          <div class="trakt-summary-card-details">
+            <div class="trakt-summary-card-titles">
+              <p class="trakt-card-title ellipsis">Ted Lasso</p>
+              <p class="trakt-card-subtitle small ellipsis secondary">喜剧</p>
+            </div>
+          </div>
+        </a>
+      </div>
+    </div>
+  </body></html>`, {
+    url: 'https://app.trakt.tv/discover/trending',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true
+  });
+
+  dom.window.localStorage.setItem('oidc.user:https://trakt.tv:201dc70c5ec6af530f12f079ea1922733f6e1085ad7b02f36d8e011b75bcea7d', JSON.stringify({
+    access_token: 'MRFxwLmnjEtkmuEvPMuuiELNaiPRoFYd'
+  }));
+
+  const requested = [];
+  dom.window.fetch = async (url) => {
+    const target = String(url);
+    requested.push(target);
+    if (target.includes('/intl/bulk')) {
+      // 批量接口这批 id 没给中文（网页端遇到的就是这种情况）
+      return { ok: true, clone() { return this; }, json: async () => ({ movie: {}, show: {} }) };
+    }
+    if (target.includes('/shows/157599/translations/zh')) {
+      return {
+        ok: true,
+        clone() { return this; },
+        json: async () => ([
+          { language: 'zh', country: 'tw', title: '綠光軍團' },
+          { language: 'zh', country: 'cn', title: '绿灯军团' }
+        ])
+      };
+    }
+    if (target.includes('/shows/162639/translations/zh')) {
+      // cn 记录存在但 title 为空，只有繁体有名字
+      return {
+        ok: true,
+        clone() { return this; },
+        json: async () => ([
+          { language: 'zh', country: 'hk', title: '乜都得教練' },
+          { language: 'zh', country: 'tw', title: '泰德拉索：錯棚教練趣事多' },
+          { language: 'zh', country: 'cn', title: null }
+        ])
+      };
+    }
+    throw new Error('Unknown URL: ' + target);
+  };
+
+  dom.window.eval(source);
+  await wait(320);
+
+  const doc = dom.window.document;
+  const title = doc.querySelector('.lanterns-card .trakt-card-title');
+  assert.strictEqual(title.textContent, '绿灯军团',
+    'the public translations endpoint fills the gap the bulk endpoint left');
+  assert.strictEqual(doc.querySelector('.lanterns-card .trakt-helper-original-title').textContent, '(Lanterns)');
+  assert(requested.some((url) => url.includes('/intl/bulk')), 'the bulk endpoint is tried first');
+  assert(requested.some((url) => url.includes('/shows/157599/translations/zh')),
+    'the translations endpoint is used as the fallback');
+  assert(!requested.some((url) => /\/shows\/lanterns\?/.test(url)),
+    'the trakt id is read from the poster URL instead of resolving the slug again');
+
+  const tedCard = doc.querySelector('.ted-lasso-card');
+  assert.strictEqual(tedCard.querySelector('.trakt-card-title').textContent, 'Ted Lasso',
+    'a title that only has traditional Chinese variants stays English');
+  assert.strictEqual(tedCard.querySelector('.trakt-helper-original-title'), null,
+    'no (Original) line without a simplified Chinese title');
+}
+
+async function runDiscoverEpisodeCardTest() {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div class="trakt-card trakt-summary-card night-agent-card">
+      <div class="trakt-card-content">
+        <a class="trakt-link" href="/shows/the-night-agent/seasons/2/episodes/1">
+          <div class="trakt-summary-poster"><div class="trakt-card-cover"><img src="https://media.trakt.tv/images/shows/000/170/228/posters/thumb/abc.jpg.webp" alt="Poster for The Night Agent"></div></div>
+          <div class="trakt-summary-card-details">
+            <div class="trakt-summary-card-titles">
+              <p class="trakt-card-title ellipsis">The Night Agent</p>
+              <p class="trakt-card-subtitle small secondary ellipsis"><bdi dir="ltr">S2 • E1</bdi> - Call</p>
+            </div>
+          </div>
+        </a>
+      </div>
+    </div>
+  </body></html>`, {
+    url: 'https://app.trakt.tv/discover/releases',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true
+  });
+
+  dom.window.sessionStorage.setItem('trakt_media_info_cache', JSON.stringify({
+    'show:the-night-agent': { type: 'show', slug: 'the-night-agent', id: 170228, title: 'The Night Agent' }
+  }));
+  dom.window.sessionStorage.setItem('trakt_intl_zh_cache', JSON.stringify({
+    'show:170228': '暗夜情报员'
+  }));
+
+  dom.window.eval(source);
+  await wait(200);
+
+  const doc = dom.window.document;
+  assert.strictEqual(doc.querySelector('.night-agent-card .trakt-card-title').textContent, 'The Night Agent',
+    'episode cards on /discover/releases are left to the app');
+  assert.strictEqual(doc.querySelector('.night-agent-card .trakt-helper-original-title'), null,
+    'episode cards get no extra original title line');
+  assert.strictEqual(doc.querySelector('.night-agent-card .trakt-card-subtitle').textContent, 'S2 • E1 - Call',
+    'the episode line is untouched');
+}
+
 async function runNowPlayingTest() {
   const dom = new JSDOM(`<!doctype html><html><body>
     <div class="trakt-now-playing-container">
@@ -534,6 +786,9 @@ async function runNowPlayingSwitchToMovieTest() {
   await runSmartListOverviewPosterTest();
   await runLiveResolveTest();
   await runLivePosterResolveTest();
+  await runDiscoverTitleTest();
+  await runDiscoverTranslationFetchTest();
+  await runDiscoverEpisodeCardTest();
   await runNowPlayingTest();
   await runNowPlayingEpisodeTest();
   await runNowPlayingEpisodeTitleTest();

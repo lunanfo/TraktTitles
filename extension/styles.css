@@ -36,6 +36,17 @@
     white-space: nowrap !important;
 }
 
+/* Discover 页（/discover/trending 等）的原名行要和官方那一行完全一致。
+   官方那行是没有颜色类的裸 <p>（实测文字像素 ≈249，和剧名 246 一样亮），只有「科幻」那种
+   类型行才是次级色（≈143）。所以这里把上面那条给智能列表写的次级色 + 收紧间距全部复位：
+   颜色改成继承容器（与官方同一个父节点，天然一致），字号回到 --font-size-text。 */
+.trakt-helper-original-title.trakt-helper-discover-original-title {
+    margin: 0 !important;
+    font-size: var(--font-size-text, 1rem) !important;
+    font-weight: 400 !important;
+    color: inherit !important;
+}
+
 /* Lift the centered cover badge slightly so its card title stays on the same
    baseline as cards without a badge. */
 .trakt-helper-cover-badge {

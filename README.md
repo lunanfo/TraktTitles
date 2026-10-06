@@ -7,7 +7,7 @@ Trakt 网页端（[app.trakt.tv](https://app.trakt.tv)）在部分位置（如�
 本项目实现以下功能：
 
 1. **补全卡片标题** —— 自动识别仅有海报的卡片，在海报下方补回规范剧名（自动清理“海报”、poster、引号等多余文字）。
-2. **智能列表 & 搜索页双语显示** —— 针对智能列表视图（`/lists/smart/view`）与搜索页（`/search`），利用 Trakt 官方批量接口（`intl/bulk`）获取中文译名，实现与待看列表（Watchlist）一致的原生双语排版：**主标题中文名 + 副标题英文原名**。
+2. **智能列表 / 搜索 / Discover 页双语显示** —— 针对智能列表视图（`/lists/smart/view`）、搜索页（`/search`）与发现页（`/discover/trending`、`/discover/anticipated`、`/discover/popular` 等），用 Trakt 官方接口（`intl/bulk` 批量 + `translations/zh` 单体兜底）获取中文译名，实现与待看列表（Watchlist）一致的原生双语排版：**主标题中文名 + 副标题英文原名**。只取简体条目（`country=cn`），没有简体名就保持英文原名，不用繁体补位。发现页官方自己的中文覆盖一旦失败或回落成英文，扩展会立刻补回中文。
 3. **零多余请求与持久缓存** —— 其他页面中已在 HTML 后台（`aria-label` / `img[alt]`）提供中文名称的卡片直接复用 DOM，不发起任何多余 API；已请求的媒体信息与译名通过 `sessionStorage` 内存缓存，避免重复请求，保证页面极速加载。
 4. **对齐徽标** —— 海报底部居中的浮层徽标（如“新”）微调上移，保持所有卡片标题落在同一条水平基线上。
 
