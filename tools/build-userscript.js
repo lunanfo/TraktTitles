@@ -36,9 +36,46 @@ const header = `// ==UserScript==
 // @icon         data:image/png;base64,${icon}
 // @match        https://trakt.tv/*
 // @match        https://app.trakt.tv/*
-// @grant        none
+// @match        https://tvtime.trakt.tv/*
+// @match        https://og.trakt.tv/*
+// @grant        GM_xmlhttpRequest
+// @connect      api.trakt.tv
 // @run-at       document-start
 // ==/UserScript==`;
+
+// 油猴脚本没有扩展后台，用 GM_xmlhttpRequest 走油猴自己的跨域通道，
+// 垫一层和 chrome.runtime.sendMessage 等价的接口，content.js 不必区分两种宿主。
+const bridge = `  // 油猴跨域桥接：模拟 chrome.runtime.sendMessage 的语义
+  var __gmBridge = (function () {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) return null;
+    if (typeof GM_xmlhttpRequest !== 'function') return null;
+    return function (message, callback) {
+      if (!message || message.type !== 'trakt-titles:fetch-translations') return false;
+      if (!/^\\/(?:shows|movies)\\/[^/]+\\/(?:translations\\/[a-z]{2,3}|seasons\\/\\d+\\/(?:episodes\\/\\d+\\/)?translations\\/[a-z]{2,3})$/.test(message.path)) {
+        callback({ ok: false, error: 'bad path' });
+        return false;
+      }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: 'https://api.trakt.tv' + message.path,
+        headers: {
+          'trakt-api-key': message.apiKey,
+          'trakt-api-version': '2',
+          'accept': 'application/json'
+        },
+        onload: function (res) {
+          try {
+            var list = JSON.parse(res.responseText);
+            callback({ ok: true, translations: Array.isArray(list) ? list : [] });
+          } catch (e) {
+            callback({ ok: false });
+          }
+        },
+        onerror: function () { callback({ ok: false }); }
+      });
+      return true;
+    };
+  })();`;
 
 const escapedCss = styles.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
 const output = `${header}
@@ -49,6 +86,7 @@ const output = `${header}
   style.textContent = \`${escapedCss}\`;
   (document.head || document.documentElement).appendChild(style);
 
+${bridge}
 ${content}
 })();
 `;

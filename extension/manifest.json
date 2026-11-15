@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Trakt Titles",
-  "version": "1.1.6",
-  "description": "Restores missing titles on poster-only Trakt cards and keeps official bilingual titles on smart lists, search and discover pages.",
+  "version": "1.4.2",
+  "description": "Restores missing titles on poster-only Trakt cards, keeps official bilingual titles on smart lists, search and discover pages, localizes show and episode titles on tvtime.trakt.tv, and translates titles and overviews on og.trakt.tv.",
   "homepage_url": "https://github.com/lunanfo/TraktTitles",
   "icons": {
     "16": "icons/trakt-circlemark-16.png",
@@ -14,7 +14,21 @@
     {
       "matches": [
         "https://trakt.tv/*",
-        "https://app.trakt.tv/*"
+        "https://app.trakt.tv/*",
+        "https://tvtime.trakt.tv/*",
+        "https://og.trakt.tv/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://trakt.tv/*",
+        "https://app.trakt.tv/*",
+        "https://tvtime.trakt.tv/*",
+        "https://og.trakt.tv/*"
       ],
       "js": [
         "content.js"
@@ -34,5 +48,11 @@
       "48": "icons/trakt-circlemark-48.png",
       "128": "icons/trakt-circlemark-128.png"
     }
-  }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "host_permissions": [
+    "https://api.trakt.tv/*"
+  ]
 }

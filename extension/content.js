@@ -1,6 +1,8 @@
 /**
  * Trakt Titles - restores names on cards that render only a poster,
- * and adds localized Chinese titles on smart list views and search.
+ * adds localized titles on smart list views and search, follows the account
+ * language on tvtime.trakt.tv, and translates titles plus overviews on
+ * og.trakt.tv (OG Redux).
  */
 (function () {
   'use strict';
@@ -34,6 +36,1161 @@
   // 免得在繁体界面之外的场景混进繁体译名。
   const INTL_LANGUAGE = 'zh';
   const INTL_COUNTRY = 'CN';
+
+  // ---------------------------------------------------------------------------
+  // tvtime.trakt.tv（新版 TV Time 网页）的剧名 / 单集名本地化
+  //
+  // 新站用横版大卡片：`article.media-row`，标题是 `a.media-row-title`，
+  // 单集名是 `a.media-row-subtitle`。看了它的 Svelte 源码（chunks/BPArmwY0.js）可以确认：
+  //   aria-label = entry.title / entry.episodeTitle
+  // 也就是**英文原本名**，aria-label 这条路拿不到译名（这点和 app.trakt.tv 不同）。
+  // 所以只能调新站自己用的那个官方接口（详情页实测就是这个请求，无需登录 token）：
+  //   https://api.trakt.tv/shows/{slug}/translations/{language}
+  //   https://api.trakt.tv/shows/{slug}/seasons/{s}/episodes/{e}/translations/{language}
+  // 返回是同一语言的多个地区变体。页面当前的 `html[lang]` 就是 Trakt 设置语言，
+  // 取对应地区（例如 zh-CN → cn、ja-JP → jp、fr-CA → ca），再退回通用条目。
+  // 取到后把译名写进标题、英文原名缩成副行，和新站自己的「标题 / meta / 副标题」结构一致。
+  // ---------------------------------------------------------------------------
+  const TVTIME_HOST = 'tvtime.trakt.tv';
+  const MEDIA_ROW_SELECTOR = 'article.media-row';
+  const POSTER_CARD_SELECTOR = '.poster-card';
+  const SPOTLIGHT_TITLE_SELECTOR = '.discover-spotlight-title';
+  const SPOTLIGHT_LOCALIZED_CLASS = 'trakt-helper-discover-localized-title';
+  const TVTIME_TITLE_CLASSES = new Set([
+    'trakt-card-title',
+    'media-row-title',
+    'media-row-subtitle',
+    'poster-title',
+    'discover-spotlight-title',
+  ]);
+  // 用公开 API（api.trakt.tv），**不要**用新站前端那个 apiz.trakt.tv：
+  // 实测 apiz 只对 trakt.tv 自有页面放开，从 tvtime.trakt.tv 以页面身份请求会 403 Forbidden
+  // （未登录时偶尔放行，登录后必 403，很容易被误判成"能用"）。
+  // api.trakt.tv 的 /translations/{language} 是公开接口，不需要用户 token。
+  const TVTIME_API_ORIGIN = 'https://api.trakt.tv';
+  const BRIDGE_REQUEST_TYPE = 'trakt-titles:request-translations';
+  const BRIDGE_RESPONSE_TYPE = 'trakt-titles:translations-response';
+  const BRIDGE_READY_TYPE = 'trakt-titles:bridge-ready';
+  const BRIDGE_READY_REQUEST_TYPE = 'trakt-titles:bridge-ready-request';
+  let bridgeReady = false;
+  let bridgeFailed = false;
+  let bridgeWaitTimer = null;
+  let bridgeWaiters = [];
+  let bridgeRequestSequence = 0;
+  const DEFAULT_LOCALE_COUNTRIES = {
+    ar: 'sa',
+    bg: 'bg',
+    ca: 'es',
+    da: 'dk',
+    de: 'de',
+    el: 'gr',
+    en: 'us',
+    es: 'es',
+    fa: 'ir',
+    fr: 'fr',
+    hu: 'hu',
+    id: 'id',
+    it: 'it',
+    ja: 'jp',
+    nb: 'no',
+    nl: 'nl',
+    pl: 'pl',
+    pt: 'pt',
+    ro: 'ro',
+    ru: 'ru',
+    sv: 'se',
+    tr: 'tr',
+    uk: 'ua',
+    zh: 'cn',
+  };
+
+  // `${localeKey}|${type}:${slug}` -> 本地化剧名 / null
+  const mediaRowTitleCache = new Map();
+  const mediaRowResolving = new Set();
+  // `${localeKey}|show:${slug}:${season}:${number}` -> 本地化单集名 / null
+  const tvTimeEpisodeTitleCache = new Map();
+  const tvTimeEpisodeResolving = new Set();
+
+  // postMessage 在部分测试环境（jsdom）里没有 event.source；只在字段存在时校验，
+  // 真实浏览器仍会拒绝来自其他窗口或源的消息。
+  function isPageMessage(event) {
+    return (!event.source || event.source === window)
+      && (!event.origin || event.origin === window.location.origin);
+  }
+
+  // 首轮扫描可能早于隔离世界的 bridge.js 注入完成。清除失败结果，
+  // 等桥就绪后重新请求，避免把“桥还没准备好”误缓存成“没有译名”。
+  function clearUnresolvedTvTimeCache() {
+    [mediaRowTitleCache, tvTimeEpisodeTitleCache].forEach((cache) => {
+      cache.forEach((value, key) => {
+        if (value === null) cache.delete(key);
+      });
+    });
+  }
+
+  function isTvTimeApp() {
+    return window.location.hostname === TVTIME_HOST;
+  }
+
+  // 从链接上解析出类型 / slug / 季集号（slug 是媒体的唯一标识，新站全部接口都用它）。
+  function tvTimeEntryOf(link) {
+    const href = link.getAttribute('href') || '';
+    const match = href.match(/^\/(movies|shows)\/([^/?#]+)/);
+    if (!match) return null;
+    const type = match[1] === 'movies' ? 'movie' : 'show';
+    const episodeMatch = href.match(/\/seasons\/(\d+)\/episodes\/(\d+)/);
+    return {
+      type,
+      slug: match[2],
+      season: episodeMatch ? parseInt(episodeMatch[1], 10) : null,
+      number: episodeMatch ? parseInt(episodeMatch[2], 10) : null,
+    };
+  }
+
+  // 读取新站当前界面语言。服务端会在 html[lang] 写入 Trakt 设置值；
+  // cookie 是页面脚本更新语言后、html[lang] 尚未刷新时的补充来源。
+  function getTvTimeLocale() {
+    const htmlLang = document.documentElement && document.documentElement.lang;
+    const cookieMatch = String(document.cookie || '').match(/(?:^|;\s*)PARAGLIDE_LOCALE=([^;]+)/);
+    const raw = String(htmlLang || (cookieMatch && decodeURIComponent(cookieMatch[1])) || '').trim();
+    if (!raw) return null;
+
+    const parts = raw.toLowerCase().replace(/_/g, '-').split('-');
+    const language = parts[0];
+    if (!/^[a-z]{2,3}$/.test(language)) return null;
+
+    const region = parts.slice(1).find(
+      (part) => /^[a-z]{2}$/.test(part) && part !== 'hans' && part !== 'hant'
+    );
+    const country = region || DEFAULT_LOCALE_COUNTRIES[language] || null;
+    return { language, country, key: `${language}:${country || ''}` };
+  }
+
+  function translationCountry(entry) {
+    return String((entry && entry.country) || '').toLowerCase();
+  }
+
+  // 同一语言下优先精确地区，再退回无地区条目。简体与繁体是不同的书写系统，
+  // 因此 zh-CN 不会拿 tw/hk 补位，反之亦然。
+  function pickLocalizedTitle(list, locale) {
+    if (!locale) return null;
+    const entries = (Array.isArray(list) ? list : []).filter((entry) => {
+      if (!entry || !entry.title) return false;
+      const language = String(entry.language || locale.language).toLowerCase();
+      return language === locale.language;
+    });
+
+    const exact = locale.country
+      ? entries.find((entry) => translationCountry(entry) === locale.country)
+      : null;
+    if (exact) return String(exact.title).trim() || null;
+
+    const generic = entries.find((entry) => !translationCountry(entry));
+    if (generic) return String(generic.title).trim() || null;
+
+    if (locale.language === 'zh') {
+      const traditionalFallbacks = locale.country === 'hk' ? ['tw'] : locale.country === 'tw' ? ['hk'] : [];
+      const fallback = entries.find((entry) => traditionalFallbacks.includes(translationCountry(entry)));
+      return fallback ? String(fallback.title).trim() || null : null;
+    }
+
+    return entries.length > 0 ? String(entries[0].title).trim() || null : null;
+  }
+
+  // content script 跑在页面环境（world: MAIN），直接请求 api.trakt.tv 会被 CORS 挡掉，
+  // 所以交给隔离世界的 bridge.js，再转扩展后台（background.js）代发。
+  // 注意：MAIN world 里拿不到 chrome.runtime，不能在这里直接调用它。
+  // 没有可用后台时（例如油猴脚本）退化成直接 fetch，至少 app.trakt.tv 同源场景还能用。
+  // undefined = 没有可用桥接，可由调用方尝试页面 fetch；
+  // null = 桥接存在但请求失败；对象 = 后台成功返回。
+  function requestTranslations(path, locale) {
+    return new Promise((resolve) => {
+      try {
+        // 油猴脚本由 build-userscript.js 注入 __gmBridge，扩展则有 chrome.runtime
+        if (typeof window.__gmBridge === 'function') {
+          window.__gmBridge(
+            {
+              type: 'trakt-titles:fetch-translations',
+              path,
+              apiKey: capturedApiKey || DEFAULT_API_KEY,
+              language: locale.language,
+              country: locale.country,
+            },
+            (response) => resolve(response && response.ok ? response : null)
+          );
+          return;
+        }
+
+        // 扩展版：content.js 在 MAIN world，chrome.runtime 不可用。
+        // 首轮扫描可能早于 bridge.js 注入，等桥就绪后再发请求；
+        // 没有桥时返回 undefined，由调用方走页面 fetch 兜底。
+        const sendBridgeRequest = () => {
+          const requestId = `trakt-titles-${Date.now()}-${++bridgeRequestSequence}`;
+          let settled = false;
+          const finish = (response) => {
+            if (settled) return;
+            settled = true;
+            window.removeEventListener('message', onMessage);
+            clearTimeout(timer);
+            resolve(response && response.ok ? response : null);
+          };
+          const onMessage = (event) => {
+            if (!isPageMessage(event)) return;
+            const message = event.data;
+            if (!message || message.type !== BRIDGE_RESPONSE_TYPE || message.requestId !== requestId) return;
+            finish(message.response);
+          };
+          const timer = setTimeout(() => finish(null), 12000);
+          window.addEventListener('message', onMessage);
+          window.postMessage({
+            type: BRIDGE_REQUEST_TYPE,
+            requestId,
+            path,
+            apiKey: capturedApiKey || DEFAULT_API_KEY,
+            language: locale.language,
+            country: locale.country,
+          }, window.location.origin);
+        };
+
+        if (bridgeReady) {
+          sendBridgeRequest();
+          return;
+        }
+        if (bridgeFailed) {
+          resolve(undefined);
+          return;
+        }
+        bridgeWaiters.push((ready) => {
+          if (ready) sendBridgeRequest();
+          else resolve(undefined);
+        });
+        if (bridgeWaitTimer === null) {
+          bridgeWaitTimer = setTimeout(() => {
+            bridgeWaitTimer = null;
+            bridgeFailed = true;
+            const waiters = bridgeWaiters;
+            bridgeWaiters = [];
+            waiters.forEach((waiter) => waiter(false));
+          }, 1000);
+        }
+      } catch (e) {
+        resolve(undefined);
+      }
+    });
+  }
+
+  window.addEventListener('message', (event) => {
+    if (isPageMessage(event) && event.data && event.data.type === BRIDGE_READY_TYPE) {
+      bridgeReady = true;
+      if (bridgeWaitTimer !== null) {
+        clearTimeout(bridgeWaitTimer);
+        bridgeWaitTimer = null;
+      }
+      const waiters = bridgeWaiters;
+      bridgeWaiters = [];
+      waiters.forEach((waiter) => waiter(true));
+      clearUnresolvedTvTimeCache();
+      schedule();
+    }
+  });
+  window.postMessage({ type: BRIDGE_READY_REQUEST_TYPE }, window.location.origin);
+
+  async function fetchTvTimeTranslations(path, locale) {
+    const fromBackground = await requestTranslations(path, locale);
+    // 后台成功响应即使没有匹配译名也会带 translations 数组；
+    // null 表示桥接已存在但请求失败，不能再发一个必然被 CORS 拦截的页面请求。
+    if (fromBackground !== null) {
+      if (fromBackground === undefined) return fetchTvTimeTranslationsInPage(path, locale);
+      return pickLocalizedTitle(fromBackground.translations, locale);
+    }
+
+    return null;
+  }
+
+  async function fetchTvTimeTranslationsInPage(path, locale) {
+    try {
+      const res = await (window.fetch || fetch)(`${TVTIME_API_ORIGIN}${path}`, {
+        headers: {
+          'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
+          'trakt-api-version': API_VERSION,
+          'accept': 'application/json',
+        },
+      });
+      if (!res.ok) return null;
+      return pickLocalizedTitle(await res.json(), locale);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function fetchMediaRowTitle(type, slug, locale) {
+    const cacheKey = `${locale.key}|${type}:${slug}`;
+    if (mediaRowTitleCache.has(cacheKey) || mediaRowResolving.has(cacheKey)) return;
+    mediaRowResolving.add(cacheKey);
+
+    try {
+      const title = await fetchTvTimeTranslations(
+        `/${type}s/${encodeURIComponent(slug)}/translations/${locale.language}`,
+        locale
+      );
+      mediaRowTitleCache.set(cacheKey, title);
+    } catch (e) {
+      mediaRowTitleCache.set(cacheKey, null);
+    } finally {
+      mediaRowResolving.delete(cacheKey);
+      schedule();
+    }
+  }
+
+  async function fetchMediaRowEpisodeTitle(slug, season, number, locale) {
+    const cacheKey = `${locale.key}|show:${slug}:${season}:${number}`;
+    if (tvTimeEpisodeTitleCache.has(cacheKey) || tvTimeEpisodeResolving.has(cacheKey)) return;
+    tvTimeEpisodeResolving.add(cacheKey);
+
+    try {
+      const title = await fetchTvTimeTranslations(
+        `/shows/${encodeURIComponent(slug)}/seasons/${season}/episodes/${number}/translations/${locale.language}`,
+        locale
+      );
+      tvTimeEpisodeTitleCache.set(cacheKey, title);
+    } catch (e) {
+      tvTimeEpisodeTitleCache.set(cacheKey, null);
+    } finally {
+      tvTimeEpisodeResolving.delete(cacheKey);
+      schedule();
+    }
+  }
+
+  function tvTimeOriginalTitle(titleElement, fallback) {
+    return titleElement.dataset.traktTitlesOriginal
+      || fallback
+      || titleElement.getAttribute('aria-label')
+      || titleElement.textContent.trim();
+  }
+
+  function sameTitle(left, right) {
+    return String(left || '').trim().toLocaleLowerCase() === String(right || '').trim().toLocaleLowerCase();
+  }
+
+  function removeTvTimeOriginalLine(titleElement) {
+    const body = titleElement.parentElement;
+    const line = body && body.querySelector(
+      `[data-trakt-titles-original-line], .${ORIGINAL_TITLE_CLASS}`
+    );
+    if (line) line.remove();
+  }
+
+  function removeDiscoverSpotlightLocalization(titleElement) {
+    const body = titleElement && titleElement.parentElement;
+    if (!body) return;
+    const localizedNode = body.querySelector(`.${SPOTLIGHT_LOCALIZED_CLASS}`);
+    if (localizedNode) localizedNode.remove();
+    // 兼容旧版本直接改写 Svelte 文本时留下的状态，升级后首轮扫描会清掉。
+    body.querySelectorAll('.trakt-helper-original-title').forEach((element) => element.remove());
+    titleElement.classList.remove(DISCOVER_ORIGINAL_TITLE_CLASS);
+    delete titleElement.dataset.traktTitlesOriginal;
+  }
+
+  function restoreOriginalTitle(titleElement, original) {
+    if (!titleElement || !original) return;
+    if (titleElement.textContent.trim() !== original) titleElement.textContent = original;
+    removeTvTimeOriginalLine(titleElement);
+  }
+
+  // 把译名写进标题节点，英文原名缩成下面那行（只加一次，重复调用不叠行）。
+  // 接口回落的标题如果就是原名，保持单行，不制造重复的副标题。
+  function applyLocalizedTitle(titleElement, localizedTitle, options = {}) {
+    if (!titleElement || !localizedTitle) return;
+    const original = tvTimeOriginalTitle(titleElement, options.original);
+    if (!original) return;
+    if (!titleElement.dataset.traktTitlesOriginal) {
+      titleElement.dataset.traktTitlesOriginal = original;
+    }
+
+    if (sameTitle(localizedTitle, original)) {
+      restoreOriginalTitle(titleElement, original);
+      return;
+    }
+
+    if (titleElement.textContent.trim() !== localizedTitle) {
+      titleElement.textContent = localizedTitle;
+    }
+
+    const body = titleElement.parentElement;
+    if (!body) return;
+    let originalLine = body.querySelector('[data-trakt-titles-original-line]');
+    if (!originalLine) {
+      originalLine = document.createElement(options.tagName || 'p');
+      originalLine.className = [
+        ORIGINAL_TITLE_CLASS,
+        options.lineClass || 'media-row-original',
+      ].join(' ');
+      originalLine.dataset.traktTitlesOriginalLine = '1';
+      // 紧跟在标题下面，meta / 副标题都往后顺延
+      titleElement.insertAdjacentElement('afterend', originalLine);
+    }
+    if (originalLine.textContent !== original) originalLine.textContent = original;
+  }
+
+  function applyLocalizedEpisodeTitle(subtitleLink, localizedTitle) {
+    if (!subtitleLink || !localizedTitle) return;
+    const original = tvTimeOriginalTitle(subtitleLink);
+    if (!original) return;
+    if (!subtitleLink.dataset.traktTitlesOriginal) subtitleLink.dataset.traktTitlesOriginal = original;
+
+    if (sameTitle(localizedTitle, original)) {
+      if (subtitleLink.textContent.trim() !== original) subtitleLink.textContent = original;
+      return;
+    }
+    if (subtitleLink.textContent.trim() !== localizedTitle) subtitleLink.textContent = localizedTitle;
+  }
+
+  function applyCachedTvTimeTitle(titleElement, entry, locale, options) {
+    const titleKey = `${locale.key}|${entry.type}:${entry.slug}`;
+    if (mediaRowTitleCache.has(titleKey)) {
+      const localizedTitle = mediaRowTitleCache.get(titleKey);
+      if (localizedTitle) {
+        applyLocalizedTitle(titleElement, localizedTitle, options);
+      } else {
+        restoreOriginalTitle(
+          titleElement,
+          tvTimeOriginalTitle(titleElement, options && options.original)
+        );
+      }
+    } else {
+      fetchMediaRowTitle(entry.type, entry.slug, locale);
+    }
+  }
+
+  function scanMediaRow(row, locale) {
+    const titleLink = row.querySelector('a.media-row-title');
+    if (!titleLink) return;
+
+    const entry = tvTimeEntryOf(titleLink);
+    if (!entry) return;
+
+    applyCachedTvTimeTitle(titleLink, entry, locale, { lineClass: 'media-row-original' });
+
+    // 单集名（卡片上「S02 E02」下面那一行）。
+    // 季集号要从 subtitle 链接自己的 href 里取——标题链接的 href 只到剧集层级
+    // （/shows/:slug），拿它解析永远得不到 season/number。
+    const subtitleLink = row.querySelector('a.media-row-subtitle');
+    const episodeEntry = subtitleLink ? tvTimeEntryOf(subtitleLink) : null;
+    if (subtitleLink && episodeEntry && episodeEntry.season != null && episodeEntry.number != null) {
+      const episodeKey = `${locale.key}|show:${entry.slug}:${episodeEntry.season}:${episodeEntry.number}`;
+      if (tvTimeEpisodeTitleCache.has(episodeKey)) {
+        const localizedEpisode = tvTimeEpisodeTitleCache.get(episodeKey);
+        if (localizedEpisode) {
+          applyLocalizedEpisodeTitle(subtitleLink, localizedEpisode);
+        } else {
+          const originalEpisode = tvTimeOriginalTitle(subtitleLink);
+          if (subtitleLink.textContent.trim() !== originalEpisode) {
+            subtitleLink.textContent = originalEpisode;
+          }
+        }
+      } else {
+        fetchMediaRowEpisodeTitle(entry.slug, episodeEntry.season, episodeEntry.number, locale);
+      }
+    }
+  }
+
+  // Popular / Discover / 详情页「更多类似」都复用 .poster-card。
+  // 海报链接的 aria-label 是新站渲染时保留的英文原名，正好作为第二行。
+  function scanPosterCard(card, locale) {
+    const titleElement = card.querySelector('.poster-title');
+    if (!titleElement) return;
+
+    const mediaLink = card.querySelector('a[href^="/shows/"], a[href^="/movies/"]');
+    const entry = mediaLink ? tvTimeEntryOf(mediaLink) : null;
+    if (!entry) return;
+
+    applyCachedTvTimeTitle(titleElement, entry, locale, {
+      original: mediaLink.getAttribute('aria-label') || '',
+      lineClass: 'poster-card-original',
+    });
+  }
+
+  // Discover 顶部焦点位会被 Svelte 复用：切换作品时同一个 <a> 只更新 href 和文本。
+  // 因此不能改写这个链接的文本（会把 Svelte 下一次渲染覆盖掉，留下上一部作品的标题），
+  // 而是在它前面插入独立译名节点，原链接只作为英文副标题显示。
+  function applyDiscoverSpotlightTitle(titleElement, localizedTitle) {
+    const body = titleElement.parentElement;
+    if (!body) return;
+
+    let localizedNode = body.querySelector(`.${SPOTLIGHT_LOCALIZED_CLASS}`);
+    if (!localizedTitle || sameTitle(localizedTitle, titleElement.textContent)) {
+      removeDiscoverSpotlightLocalization(titleElement);
+      return;
+    }
+
+    if (!localizedNode) {
+      localizedNode = document.createElement('span');
+      localizedNode.className = [
+        'discover-spotlight-title',
+        SPOTLIGHT_LOCALIZED_CLASS,
+      ].join(' ');
+    }
+    if (localizedNode.textContent !== localizedTitle) localizedNode.textContent = localizedTitle;
+    titleElement.classList.add(DISCOVER_ORIGINAL_TITLE_CLASS);
+    if (localizedNode.nextElementSibling !== titleElement) {
+      titleElement.insertAdjacentElement('beforebegin', localizedNode);
+    }
+  }
+
+  function applyCachedDiscoverSpotlightTitle(titleElement, entry, locale) {
+    const titleKey = `${locale.key}|${entry.type}:${entry.slug}`;
+    if (mediaRowTitleCache.has(titleKey)) {
+      applyDiscoverSpotlightTitle(titleElement, mediaRowTitleCache.get(titleKey));
+    } else {
+      // 媒体身份变化后先撤掉上一部的译名，等新译名回来再插入。
+      removeDiscoverSpotlightLocalization(titleElement);
+      fetchMediaRowTitle(entry.type, entry.slug, locale);
+    }
+  }
+
+  function scanDiscoverSpotlight(titleElement, locale) {
+    const entry = tvTimeEntryOf(titleElement);
+    if (!entry) {
+      removeDiscoverSpotlightLocalization(titleElement);
+      return;
+    }
+
+    applyCachedDiscoverSpotlightTitle(titleElement, entry, locale);
+  }
+
+  function scanTvTime() {
+    const locale = getTvTimeLocale();
+    if (!locale) return;
+    document.querySelectorAll(MEDIA_ROW_SELECTOR).forEach((row) => scanMediaRow(row, locale));
+    document.querySelectorAll(POSTER_CARD_SELECTOR).forEach((card) => scanPosterCard(card, locale));
+    document.querySelectorAll(SPOTLIGHT_TITLE_SELECTOR).forEach(
+      (title) => scanDiscoverSpotlight(title, locale)
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // og.trakt.tv（OG Redux：用经典 Trakt 界面重做的网站）的标题 / 简介本地化
+  //
+  // 这个站是 trakt-web 的 fork，界面和接口数据都是英文，标题有两种渲染方式：
+  //   1. 纯文本：`h1`（详情页）、`h3 > a.titles-link`（卡片）、`h2.name > a`（焦点位）
+  //   2. logo 图：`img.trimmed-logo[alt]`，放在 `h3.title-logo` / `h2.name` 里
+  // logo 是英文美术字，没法「翻译」，所以有中文名时把它隐藏、换成中文文本；
+  // 详情页和焦点位再补一行英文原名，卡片则把原名放进 tooltip（不挤占卡片高度）。
+  //
+  // 简介都在 `.overview` 里（详情页 `.summary-frame .details > .overview`，
+  // 榜单/Discover 焦点位 `p.overview`），宣传语是 `.tagline`。
+  //
+  // 译名/简介仍然只走公开接口：
+  //   /shows|movies/{slug}/translations/zh
+  //   /shows/{slug}/seasons/{s}/translations/zh
+  //   /shows/{slug}/seasons/{s}/episodes/{e}/translations/zh
+  // 只取 country=cn 的简体条目，没有简体就不拿繁体补位。
+  // ---------------------------------------------------------------------------
+  const OG_HOST = 'og.trakt.tv';
+  const OG_CACHE_STORAGE_KEY = 'trakt_og_zh_cache';
+  const OG_LOCALE = { language: 'zh', country: 'cn', key: 'zh:cn' };
+  const OG_TITLE_CLASS = 'trakt-helper-og-title';
+  const OG_ORIGINAL_CLASS = 'trakt-helper-og-original';
+  const OG_LOGO_HIDDEN_CLASS = 'trakt-helper-og-logo-hidden';
+  // 榜单页面的 /shows/<x> 是列表路由，不是媒体详情。
+  const OG_CHART_SLUGS = new Set([
+    'trending',
+    'popular',
+    'anticipated',
+    'recommended',
+    'favorited',
+    'watched',
+    'played',
+    'collected',
+    'boxoffice',
+  ]);
+
+  // `${type}:${slug}` -> { title, overview, tagline } | null
+  const ogMediaCache = new Map();
+  // `${slug}:${season}` -> { title, overview } | null
+  const ogSeasonCache = new Map();
+  // `${slug}:${season}:${episode}` -> { title, overview } | null
+  const ogEpisodeCache = new Map();
+  const ogResolving = new Set();
+  let ogSaveTimer = null;
+  // 一页榜单可能有四五十张卡片。限到 6 个并发，避免一次性打出一串请求被 CDN 限流。
+  const OG_MAX_CONCURRENT_REQUESTS = 6;
+  const ogRequestQueue = [];
+  let ogActiveRequests = 0;
+
+  function isOgRedux() {
+    return window.location.hostname === OG_HOST;
+  }
+
+  function loadOgCache() {
+    if (!isOgRedux()) return;
+    try {
+      const raw = sessionStorage.getItem(OG_CACHE_STORAGE_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      const restore = (map, source) => {
+        if (!source || typeof source !== 'object') return;
+        for (const [key, value] of Object.entries(source)) map.set(key, value);
+      };
+      restore(ogMediaCache, data && data.media);
+      restore(ogSeasonCache, data && data.season);
+      restore(ogEpisodeCache, data && data.episode);
+    } catch (e) { }
+  }
+
+  function scheduleOgCacheSave() {
+    if (ogSaveTimer !== null) return;
+    ogSaveTimer = setTimeout(() => {
+      ogSaveTimer = null;
+      try {
+        const dump = (map) => {
+          const out = {};
+          map.forEach((value, key) => { out[key] = value; });
+          return out;
+        };
+        sessionStorage.setItem(OG_CACHE_STORAGE_KEY, JSON.stringify({
+          media: dump(ogMediaCache),
+          season: dump(ogSeasonCache),
+          episode: dump(ogEpisodeCache),
+        }));
+      } catch (e) { }
+    }, 250);
+  }
+
+  async function requestOgTranslations(path) {
+    const fromBackground = await requestTranslations(path, OG_LOCALE);
+    // null = 桥接在但请求失败；undefined = 没有桥接（油猴已注入 __gmBridge 的情况下不会出现）。
+    if (fromBackground === null) return null;
+    if (fromBackground === undefined) return requestOgTranslationsInPage(path);
+    return Array.isArray(fromBackground.translations) ? fromBackground.translations : [];
+  }
+
+  // 所有标题/简介请求都从这里排队，缓存命中时根本不会走到这里。
+  function queueOgTranslations(path) {
+    return new Promise((resolve) => {
+      ogRequestQueue.push({ path, resolve });
+      drainOgRequestQueue();
+    });
+  }
+
+  function drainOgRequestQueue() {
+    while (ogActiveRequests < OG_MAX_CONCURRENT_REQUESTS && ogRequestQueue.length > 0) {
+      const job = ogRequestQueue.shift();
+      ogActiveRequests += 1;
+      requestOgTranslations(job.path)
+        .then((list) => job.resolve(list))
+        .catch(() => job.resolve(null))
+        .finally(() => {
+          ogActiveRequests -= 1;
+          drainOgRequestQueue();
+        });
+    }
+  }
+
+  async function requestOgTranslationsInPage(path) {
+    try {
+      const res = await (window.fetch || fetch)(`${TVTIME_API_ORIGIN}${path}`, {
+        headers: {
+          'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
+          'trakt-api-version': API_VERSION,
+          'accept': 'application/json',
+        },
+      });
+      if (!res.ok) return null;
+      const list = await res.json();
+      return Array.isArray(list) ? list : [];
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // OG 站是英文界面，固定要简体中文：精确地区 cn → 无地区通用条目，
+  // 绝不拿 tw/hk 的繁体补位（与 tvtime 的规则一致）。
+  function pickOgTranslation(list) {
+    const entries = (Array.isArray(list) ? list : []).filter(
+      (entry) => entry && (entry.title || entry.overview || entry.tagline)
+    );
+    const exact = entries.find(
+      (entry) => String(entry.country || '').toLowerCase() === 'cn'
+    );
+    const chosen = exact || entries.find((entry) => !entry.country) || null;
+    if (!chosen) return null;
+    return {
+      title: chosen.title ? String(chosen.title).trim() : '',
+      overview: chosen.overview ? String(chosen.overview).trim() : '',
+      tagline: chosen.tagline ? String(chosen.tagline).trim() : '',
+    };
+  }
+
+  function ensureOgMedia(type, slug) {
+    const key = `${type}:${slug}`;
+    if (ogMediaCache.has(key)) return ogMediaCache.get(key);
+    if (ogResolving.has(key)) return undefined;
+    ogResolving.add(key);
+
+    queueOgTranslations(`/${type}s/${encodeURIComponent(slug)}/translations/zh`)
+      .then((list) => (list ? pickOgTranslation(list) : null))
+      .catch(() => null)
+      .then((value) => {
+        ogMediaCache.set(key, value);
+        ogResolving.delete(key);
+        scheduleOgCacheSave();
+        schedule();
+      });
+    return undefined;
+  }
+
+  function ensureOgSeason(slug, season) {
+    const key = `${slug}:${season}`;
+    if (ogSeasonCache.has(key)) return ogSeasonCache.get(key);
+    if (ogResolving.has(key)) return undefined;
+    ogResolving.add(key);
+
+    queueOgTranslations(
+      `/shows/${encodeURIComponent(slug)}/seasons/${season}/translations/zh`
+    )
+      .then((list) => (list ? pickOgTranslation(list) : null))
+      .catch(() => null)
+      .then((value) => {
+        ogSeasonCache.set(key, value);
+        ogResolving.delete(key);
+        scheduleOgCacheSave();
+        schedule();
+      });
+    return undefined;
+  }
+
+  function ensureOgEpisode(slug, season, number) {
+    const key = `${slug}:${season}:${number}`;
+    if (ogEpisodeCache.has(key)) return ogEpisodeCache.get(key);
+    if (ogResolving.has(key)) return undefined;
+    ogResolving.add(key);
+
+    queueOgTranslations(
+      `/shows/${encodeURIComponent(slug)}/seasons/${season}/episodes/${number}/translations/zh`
+    )
+      .then((list) => (list ? pickOgTranslation(list) : null))
+      .catch(() => null)
+      .then((value) => {
+        ogEpisodeCache.set(key, value);
+        ogResolving.delete(key);
+        scheduleOgCacheSave();
+        schedule();
+      });
+    return undefined;
+  }
+
+  // 从链接里解析媒体（电影/剧）或单集；OG 站的链接都是站内相对路径。
+  function ogEntryFromHref(href) {
+    const match = String(href || '').match(
+      /^\/(shows|movies)\/([^/?#]+)(?:\/seasons\/(\d+)\/episodes\/(\d+))?/
+    );
+    if (!match) return null;
+    const slug = decodeURIComponent(match[2]);
+    if (OG_CHART_SLUGS.has(slug)) return null;
+    // 只有季（没有集）的链接是季海报，标题是界面文案，不当作媒体标题。
+    if (match[3] && !match[4]) return null;
+    return {
+      type: match[1] === 'movies' ? 'movie' : 'show',
+      slug,
+      season: match[3] ? parseInt(match[3], 10) : null,
+      number: match[4] ? parseInt(match[4], 10) : null,
+    };
+  }
+
+  // 当前页面是不是媒体详情页（剧/电影/季/集）。榜单和统计页没有详情标题。
+  function ogDetailRoute() {
+    if (!document.querySelector('.summary-title h1, .episode-title h1')) return null;
+    const path = window.location.pathname;
+    const match = path.match(
+      /^\/(shows|movies)\/([^/]+)(?:\/seasons\/(\d+)(?:\/episodes\/(\d+))?)?\/?$/
+    );
+    if (!match) return null;
+    const slug = decodeURIComponent(match[2]);
+    if (OG_CHART_SLUGS.has(slug)) return null;
+    return {
+      type: match[1] === 'movies' ? 'movie' : 'show',
+      slug,
+      season: match[3] ? parseInt(match[3], 10) : null,
+      episode: match[4] ? parseInt(match[4], 10) : null,
+    };
+  }
+
+  function ogDirectTextNode(element) {
+    if (!element) return null;
+    return [...element.childNodes].find(
+      (node) => node.nodeType === 3 && node.nodeValue.trim()
+    ) || null;
+  }
+
+  // 保留原文两端的空白，避免把 `MobLand ` 和 year span 之间的间隔吃掉。
+  function replaceNodeText(node, value) {
+    const current = node.nodeValue || '';
+    const leading = (current.match(/^\s*/) || [''])[0];
+    const trailing = (current.match(/\s*$/) || [''])[0];
+    const next = `${leading}${value}${trailing}`;
+    if (current !== next) node.nodeValue = next;
+  }
+
+  // 找到真正承载标题文字的元素：h1 自己；带年份的 h3 里则是 `a`；
+  // 单集行 h3 里要跳过写着「1x01」的编号链接。
+  function ogTitleTextElement(host) {
+    if (ogDirectTextNode(host)) return host;
+    const anchors = [...host.querySelectorAll('a[href]')];
+    return anchors.find((anchor) => {
+      // 集号链接有两种写法：`<a><span class="number">1x01</span></a>`
+      // 和 `<a class="number">1x01&nbsp;</a>`，都不能当作标题本体。
+      if (anchor.classList.contains('number') || anchor.querySelector('.number')) return false;
+      // logo 标题和我们已经插入的译名节点都不是「文本标题」，
+      // 否则第二轮扫描会把 span / img 一起 textContent 覆盖掉。
+      if (anchor.querySelector(`img.trimmed-logo, .${OG_TITLE_CLASS}`)) return false;
+      return !!anchor.textContent.trim();
+    }) || null;
+  }
+
+  function removeOgOriginalLine(host) {
+    const next = host.nextElementSibling;
+    if (next && next.classList && next.classList.contains(OG_ORIGINAL_CLASS)) next.remove();
+  }
+
+  function syncOgOriginalLine(host, original) {
+    const parent = host.parentElement;
+    if (!parent) return;
+    let line = host.nextElementSibling;
+    if (!line || !line.classList || !line.classList.contains(OG_ORIGINAL_CLASS)) {
+      line = document.createElement('p');
+      line.className = OG_ORIGINAL_CLASS;
+      host.insertAdjacentElement('afterend', line);
+    }
+    if (line.textContent !== original) line.textContent = original;
+  }
+
+  // 有些卡片把「集号 + 集名」写在同一个文本节点里（Dashboard Up Next 就是 "3x03 集名"），
+  // 替换文本时必须把集号原样保留，否则界面上只剩中文集名。
+  function ogEpisodeNumberPrefix(text) {
+    const match = String(text || '').match(
+      /^\s*(S\d+\s*E\d+|Special\s+\d+|\d+x\d+(?:\s*\(\d+\))?)\s+/i
+    );
+    return match ? match[1] : '';
+  }
+
+  function ogTitleNodeText(key, current, localizedTitle) {
+    if (key.indexOf('episode:') !== 0) return localizedTitle;
+    const prefix = ogEpisodeNumberPrefix(current);
+    return prefix ? `${prefix} ${localizedTitle}` : localizedTitle;
+  }
+
+  // 把译名写进标题（文本或 logo 两种形态都支持）。
+  // 没有译名 / 译名与原名相同时恢复英文，并清掉我们插入的节点。
+  function ogApplyTitle(host, key, translation, options = {}) {
+    if (!host) return;
+
+    if (host.dataset.traktOgKey !== key) {
+      host.dataset.traktOgKey = key;
+      delete host.dataset.traktOgOriginal;
+      host.querySelectorAll(`.${OG_TITLE_CLASS}`).forEach((node) => node.remove());
+      host.querySelectorAll(`img.${OG_LOGO_HIDDEN_CLASS}`).forEach((image) => {
+        image.classList.remove(OG_LOGO_HIDDEN_CLASS);
+      });
+      removeOgOriginalLine(host);
+      if (host.dataset.traktOgTooltip === '1') {
+        host.removeAttribute('title');
+        delete host.dataset.traktOgTooltip;
+      }
+    }
+
+    const logo = host.querySelector('img.trimmed-logo');
+    const textElement = ogTitleTextElement(host);
+    const textNode = textElement ? ogDirectTextNode(textElement) : null;
+    // 标题文字只取那一个文本节点：h1 后面还挂着年份 / 分级节点，
+    // 用 textContent 会把「1999 R」也当成原名。
+    const visibleTitle = textNode
+      ? textNode.nodeValue.trim()
+      : (logo ? (logo.alt || '').trim() : host.textContent.trim());
+
+    const localizedTitle = translation && translation.title ? translation.title.trim() : '';
+    // 焦点位轮播会复用同一个节点：标题文本变成另一条内容时，同步刷新英文原名，
+    // 否则原名行会停在上一条作品上。
+    let original = host.dataset.traktOgOriginal || '';
+    const candidate = options.original || visibleTitle;
+    if (candidate && !ZH_REGEX.test(candidate) && !sameTitle(candidate, localizedTitle)
+      && (!original || !sameTitle(candidate, original))) {
+      original = candidate;
+      host.dataset.traktOgOriginal = candidate;
+    }
+    if (!localizedTitle || (original && sameTitle(localizedTitle, original))) {
+      if (textElement) {
+        const node = ogDirectTextNode(textElement);
+        if (node && original && node.nodeValue.trim() !== original) {
+          replaceNodeText(node, original);
+        }
+      }
+      if (logo) logo.classList.remove(OG_LOGO_HIDDEN_CLASS);
+      host.querySelectorAll(`.${OG_TITLE_CLASS}`).forEach((node) => node.remove());
+      removeOgOriginalLine(host);
+      if (options.tooltip && host.dataset.traktOgTooltip === '1') {
+        host.removeAttribute('title');
+        delete host.dataset.traktOgTooltip;
+      }
+      return;
+    }
+
+    if (textElement) {
+      const node = ogDirectTextNode(textElement);
+      if (node) {
+        replaceNodeText(node, ogTitleNodeText(key, node.nodeValue, localizedTitle));
+      } else if (!textElement.children.length) {
+        textElement.textContent = localizedTitle;
+      }
+      if (logo) logo.classList.remove(OG_LOGO_HIDDEN_CLASS);
+    } else if (logo) {
+      logo.classList.add(OG_LOGO_HIDDEN_CLASS);
+      let span = host.querySelector(`.${OG_TITLE_CLASS}`);
+      if (!span) {
+        span = document.createElement('span');
+        span.className = OG_TITLE_CLASS;
+        (host.querySelector('a') || host).appendChild(span);
+      }
+      if (span.textContent !== localizedTitle) span.textContent = localizedTitle;
+    } else {
+      return;
+    }
+
+    if (options.bilingual && original) syncOgOriginalLine(host, original);
+    else removeOgOriginalLine(host);
+
+    if (options.tooltip) {
+      const label = original ? `${localizedTitle} (${original})` : localizedTitle;
+      if (host.getAttribute('title') !== label) host.title = label;
+      host.dataset.traktOgTooltip = '1';
+    }
+  }
+
+  // 简介可能是 `.overview` 直接包含文本，也可能再包一层 `.read-more`，
+  // 找到真正持有那一个文本节点的元素再改写，Svelte 的注释锚点保持不动。
+  function ogOverviewTextHost(element) {
+    if (!element) return null;
+    const directText = (host) => [...host.childNodes].filter(
+      (node) => node.nodeType === 3 && node.nodeValue.trim()
+    );
+    if (directText(element).length === 1) return element;
+    const descendants = [...element.querySelectorAll('div, span, p')];
+    return descendants.find((host) => directText(host).length === 1) || null;
+  }
+
+  function ogApplyOverview(element, localizedText) {
+    const host = ogOverviewTextHost(element);
+    if (!host) return;
+    const node = [...host.childNodes].find(
+      (child) => child.nodeType === 3 && child.nodeValue.trim()
+    );
+    if (!node) return;
+    const current = node.nodeValue.trim();
+
+    let original = host.dataset.traktOgOriginalOverview || '';
+    // 页面被复用成另一条内容（例如 Discover 轮播切片）时，用当前的英文文本刷新底稿。
+    if (current && current !== original && !ZH_REGEX.test(current)) {
+      original = current;
+      host.dataset.traktOgOriginalOverview = current;
+    }
+
+    const localized = localizedText ? String(localizedText).trim() : '';
+    if (localized && !sameTitle(localized, original)) {
+      if (current !== localized) node.nodeValue = localized;
+      return;
+    }
+    if (original && current !== original) node.nodeValue = original;
+  }
+
+  function scanOgDetail(route) {
+    const titleElement = document.querySelector('.summary-title h1, .episode-title h1');
+    const overviewElement = document.querySelector('.summary-frame .details > .overview');
+    const taglineElement = document.querySelector('.summary-frame .details > .tagline');
+
+    if (route.episode) {
+      const data = ensureOgEpisode(route.slug, route.season, route.episode);
+      if (data === undefined) return;
+      ogApplyTitle(
+        titleElement,
+        `episode:${route.slug}:${route.season}:${route.episode}`,
+        data,
+        { bilingual: true }
+      );
+      ogApplyOverview(overviewElement, data && data.overview);
+      return;
+    }
+
+    if (route.season) {
+      // 季页标题是界面文案「Season 1」，不替换；翻译它的简介和分集标题。
+      const data = ensureOgSeason(route.slug, route.season);
+      if (data === undefined) return;
+      ogApplyOverview(overviewElement, data && data.overview);
+      return;
+    }
+
+    const data = ensureOgMedia(route.type, route.slug);
+    if (data === undefined) return;
+    ogApplyTitle(
+      titleElement,
+      `${route.type}:${route.slug}`,
+      data,
+      { bilingual: true }
+    );
+    ogApplyOverview(overviewElement, data && data.overview);
+    ogApplyOverview(taglineElement, data && data.tagline);
+  }
+
+  // 榜单页 / Discover 顶部的大焦点位：`section.chart-hero`、`section.hero`。
+  function scanOgHeroes() {
+    document.querySelectorAll('section.chart-hero, section.hero').forEach((section) => {
+      const name = section.querySelector('h2.name');
+      if (!name) return;
+      const link = name.querySelector('a[href]')
+        || section.querySelector('a[href^="/shows/"], a[href^="/movies/"]');
+      const entry = link ? ogEntryFromHref(link.getAttribute('href')) : null;
+      if (!entry) return;
+
+      const data = ensureOgMedia(entry.type, entry.slug);
+      if (data === undefined) return;
+
+      ogApplyTitle(name, `${entry.type}:${entry.slug}`, data, { bilingual: true });
+      ogApplyOverview(section.querySelector('p.overview'), data && data.overview);
+    });
+  }
+
+  // 卡片标题。OG 站至少有三种排版：
+  //   1. `h3` 里包着详情链接：横幅卡、搜索结果、Dashboard spotlight
+  //   2. `a.titles-link` 里包着 h3：Discover 竖版海报卡、首页海报架
+  //   3. `img.trimmed-logo`：英文 logo，前面两种都可能出现
+  // 一律不碰弹窗、评论区、导航里的小标题。
+  const OG_CARD_EXCLUDED = 'dialog, [role="dialog"], .comments, .comment, header, nav, footer';
+
+  function ogApplyCardTitle(title, entry) {
+    const isEpisode = entry.season != null && entry.number != null;
+    const data = isEpisode
+      ? ensureOgEpisode(entry.slug, entry.season, entry.number)
+      : ensureOgMedia(entry.type, entry.slug);
+    if (data === undefined) return;
+
+    const key = isEpisode
+      ? `episode:${entry.slug}:${entry.season}:${entry.number}`
+      : `${entry.type}:${entry.slug}`;
+    ogApplyTitle(title, key, data, { tooltip: true });
+  }
+
+  function scanOgCards() {
+    document.querySelectorAll('h3').forEach((title) => {
+      if (title.id && title.id.startsWith('episode-')) return;
+      if (title.closest(OG_CARD_EXCLUDED)) return;
+      const link = title.querySelector('a[href^="/shows/"], a[href^="/movies/"]');
+      const entry = link ? ogEntryFromHref(link.getAttribute('href')) : null;
+      if (!entry) return;
+      ogApplyCardTitle(title, entry);
+    });
+
+    document.querySelectorAll('article.poster-card a.titles-link').forEach((anchor) => {
+      const entry = ogEntryFromHref(anchor.getAttribute('href'));
+      if (!entry) return;
+      const title = anchor.querySelector('h3');
+      if (!title) return;
+      ogApplyCardTitle(title, entry);
+    });
+
+    // Dashboard 的 spotlight 卡片带一段简介，和标题分开处理。
+    document.querySelectorAll('article.spotlight').forEach((card) => {
+      const link = card.querySelector('h3 a[href^="/shows/"], h3 a[href^="/movies/"]');
+      const entry = link ? ogEntryFromHref(link.getAttribute('href')) : null;
+      if (!entry) return;
+      const data = ensureOgMedia(entry.type, entry.slug);
+      if (data === undefined) return;
+      ogApplyOverview(card.querySelector('.overview'), data && data.overview);
+    });
+  }
+
+  // 季详情页的分集列表行：`h3#episode-<id>` 里的标题链接 + 同一行的简介。
+  function scanOgEpisodeRows() {
+    document.querySelectorAll('h3[id^="episode-"]').forEach((title) => {
+      const link = ogTitleTextElement(title);
+      const entry = link ? ogEntryFromHref(link.getAttribute('href')) : null;
+      if (!entry || entry.season == null || entry.number == null) return;
+
+      const data = ensureOgEpisode(entry.slug, entry.season, entry.number);
+      if (data === undefined) return;
+
+      ogApplyTitle(
+        title,
+        `episode:${entry.slug}:${entry.season}:${entry.number}`,
+        data,
+        { tooltip: true }
+      );
+
+      const row = title.closest('article.row, article');
+      if (row) ogApplyOverview(row.querySelector('.overview'), data && data.overview);
+    });
+  }
+
+  // 有些标题不在 h3 里：Dashboard 的 Upcoming Schedule 用 `a.show`（周视图）
+  // 和 `.schedule h4 > a`（焦点卡片），日程里的单集名则是 `.episodes` 下的链接，
+  // 结构是 `<a href><b>3x04</b> 集名</a>`，只能改文本节点、保留 <b> 集号。
+  // 日历卡片的剧名小字也用 `a.show`，一并处理。
+  function scanOgInlineTitles() {
+    document.querySelectorAll('a.show, a.show-link').forEach((anchor) => {
+      const entry = ogEntryFromHref(anchor.getAttribute('href'));
+      if (!entry || entry.season != null) return;
+      const data = ensureOgMedia(entry.type, entry.slug);
+      if (data === undefined) return;
+      ogApplyTitle(anchor, `${entry.type}:${entry.slug}`, data, { tooltip: true });
+    });
+
+    document.querySelectorAll('.schedule h4 a[href]').forEach((anchor) => {
+      const entry = ogEntryFromHref(anchor.getAttribute('href'));
+      if (!entry || entry.season != null) return;
+      const data = ensureOgMedia(entry.type, entry.slug);
+      if (data === undefined) return;
+      ogApplyTitle(anchor, `${entry.type}:${entry.slug}`, data, { tooltip: true });
+    });
+
+    document.querySelectorAll('.schedule .episodes a[href*="/episodes/"]').forEach((anchor) => {
+      const entry = ogEntryFromHref(anchor.getAttribute('href'));
+      if (!entry || entry.season == null || entry.number == null) return;
+      const data = ensureOgEpisode(entry.slug, entry.season, entry.number);
+      if (data === undefined) return;
+      ogApplyTitle(
+        anchor,
+        `episode:${entry.slug}:${entry.season}:${entry.number}`,
+        data,
+        { tooltip: true }
+      );
+    });
+
+    // 电影日程没有单集名，下面那行是电影自己的 tagline，也一并翻译。
+    document.querySelectorAll('.schedule .episodes .tagline').forEach((line) => {
+      const scope = line.closest('article.card, li.row');
+      const link = scope && scope.querySelector(
+        'h4 a[href^="/shows/"], h4 a[href^="/movies/"], a.show[href^="/shows/"], a.show[href^="/movies/"]'
+      );
+      const entry = link ? ogEntryFromHref(link.getAttribute('href')) : null;
+      if (!entry || entry.season != null) return;
+      const data = ensureOgMedia(entry.type, entry.slug);
+      if (data === undefined) return;
+      ogApplyOverview(line, data && data.tagline);
+    });
+  }
+
+  function scanOg() {
+    // 清理脱离标题的旧原名行（Svelte 重渲染时可能留下孤儿节点）。
+    document.querySelectorAll(`.${OG_ORIGINAL_CLASS}`).forEach((line) => {
+      const previous = line.previousElementSibling;
+      if (!previous || !previous.dataset || !previous.dataset.traktOgKey) line.remove();
+    });
+
+    const route = ogDetailRoute();
+    if (route) scanOgDetail(route);
+    scanOgHeroes();
+    scanOgInlineTitles();
+    scanOgCards();
+    scanOgEpisodeRows();
+  }
 
   function isSmartListPage() {
     return window.location.pathname.startsWith('/lists/smart');
@@ -852,6 +2009,10 @@
       element.remove();
     });
     localizeNowPlaying();
+    // 新版 TV Time 网页是另一套 DOM（article.media-row），单独走一遍。
+    if (isTvTimeApp()) scanTvTime();
+    // OG Redux（og.trakt.tv）是经典界面的重制版，又是一套 DOM。
+    if (isOgRedux()) scanOg();
     document.querySelectorAll(CARD_SELECTOR).forEach((card) => {
       scanCard(card);
     });
@@ -891,9 +2052,12 @@
   }
 
   loadStoredCache();
+  loadOgCache();
   interceptFetch();
 
   const observer = new MutationObserver(schedule);
+  // SvelteKit 切换焦点位 / 详情内容时先改 href，再换文本；两种站都需要立刻重扫。
+  const linkObserver = (isTvTimeApp() || isOgRedux()) ? new MutationObserver(schedule) : null;
 
   // 网页端（Svelte）改写标题时是直接改文本节点，只会触发 characterData，
   // childList 观察器看不到。单独盯一眼标题文本：官方把中文退回英文时马上补回来。
@@ -901,7 +2065,14 @@
     for (const record of records) {
       const target = record.target;
       const element = target && target.nodeType === 3 ? target.parentElement : target;
-      if (element && element.classList && element.classList.contains('trakt-card-title')) {
+      if (element && element.classList
+        && [...element.classList].some((className) => TVTIME_TITLE_CLASSES.has(className))) {
+        schedule();
+        return;
+      }
+      // OG Redux 的标题 / 简介由 Svelte 直接改文本节点，同样只会触发 characterData。
+      if (isOgRedux() && element && element.closest
+        && element.closest('.summary-title, .overview, .tagline, .title-wrapper, .titles, .caption, h2.name, h3[id^="episode-"]')) {
         schedule();
         return;
       }
@@ -913,6 +2084,11 @@
     if (!root) return setTimeout(start, 20);
     observer.observe(root, { childList: true, subtree: true });
     titleObserver.observe(root, { characterData: true, subtree: true });
+    // Svelte 切换 Discover 焦点位时可能先改 href、稍后才改标题文本。
+    // 立即感知身份变化，先撤下旧译名，避免在新文本到达前把上一部作品标成新作品。
+    if (linkObserver) {
+      linkObserver.observe(root, { attributes: true, subtree: true, attributeFilter: ['href'] });
+    }
     scan();
   };
 
