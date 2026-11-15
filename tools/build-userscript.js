@@ -55,14 +55,16 @@ const bridge = `  // 油猴跨域桥接：模拟 chrome.runtime.sendMessage 的�
         callback({ ok: false, error: 'bad path' });
         return false;
       }
+      var headers = {
+        'trakt-api-key': message.apiKey,
+        'trakt-api-version': '2',
+        'accept': 'application/json'
+      };
+      if (message.token) headers.authorization = 'Bearer ' + message.token;
       GM_xmlhttpRequest({
         method: 'GET',
         url: 'https://api.trakt.tv' + message.path,
-        headers: {
-          'trakt-api-key': message.apiKey,
-          'trakt-api-version': '2',
-          'accept': 'application/json'
-        },
+        headers: headers,
         onload: function (res) {
           try {
             var list = JSON.parse(res.responseText);

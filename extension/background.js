@@ -6,26 +6,40 @@
  * 这里把译名请求放到扩展自己的上下文里发（扩展有 host_permissions，不受页面 CORS 限制），
  * 再通过消息把结果回传给 content script。
  */
-const DEFAULT_API_KEY = '201dc70c5ec6af530f12f079ea1922733f6e1085ad7b02f36d8e011b75bcea7d';
 const API_VERSION = '2';
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== 'trakt-titles:fetch-translations') return false;
 
-  const { path, apiKey } = message;
+  const { path, apiKey, token } = message;
+  // key 由 content script 在页面里捕获/解析后传进来，源码不再内置 Trakt 官方 Client ID。
+  if (typeof apiKey !== 'string' || !apiKey) {
+    sendResponse({ ok: false, error: 'missing api key' });
+    return false;
+  }
   if (typeof path !== 'string' || !/^\/(?:shows|movies)\/[^/]+\/(?:translations\/[a-z]{2,3}|seasons\/\d+\/(?:episodes\/\d+\/)?translations\/[a-z]{2,3})$/.test(path)) {
     sendResponse({ ok: false, error: 'bad path' });
     return false;
   }
 
-  fetch(`https://api.trakt.tv${path}`, {
-    headers: {
-      'trakt-api-key': apiKey || DEFAULT_API_KEY,
-      'trakt-api-version': API_VERSION,
-      'accept': 'application/json',
-    },
-  })
+  const headers = {
+    'trakt-api-key': apiKey,
+    'trakt-api-version': API_VERSION,
+    'accept': 'application/json',
+  };
+  // 已登录用户的 token 让请求走「每个用户」的限流桶，并可返回用户可见的数据（这里都是公开 GET）。
+  if (typeof token === 'string' && token) headers.authorization = `Bearer ${token}`;
+
+  fetch(`https://api.trakt.tv${path}`, { headers })
     .then((res) => {
+      if (res.status === 429) {
+        sendResponse({
+          ok: false,
+          status: 429,
+          retryAfter: res.headers.get('retry-after'),
+        });
+        return null;
+      }
       if (!res.ok) {
         sendResponse({ ok: false, status: res.status });
         return null;

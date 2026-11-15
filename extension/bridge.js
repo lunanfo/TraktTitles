@@ -27,27 +27,56 @@
     }
   });
 
+  function respond(requestId, response) {
+    window.postMessage({
+      type: RESPONSE_TYPE,
+      requestId,
+      response: response || { ok: false },
+    }, window.location.origin);
+  }
+
   window.addEventListener('message', (event) => {
     if (!isPageMessage(event)) return;
     const message = event.data;
     if (!message || message.type !== REQUEST_TYPE || typeof message.requestId !== 'string') return;
 
-    chrome.runtime.sendMessage(
-      {
-        type: 'trakt-titles:fetch-translations',
-        path: message.path,
-        apiKey: message.apiKey,
-      },
-      (response) => {
-        const relayed = chrome.runtime.lastError
-          ? { ok: false, error: chrome.runtime.lastError.message }
-          : response;
-        window.postMessage({
-          type: RESPONSE_TYPE,
-          requestId: message.requestId,
-          response: relayed || { ok: false },
-        }, window.location.origin);
-      }
-    );
+    // 扩展被重新加载/更新/卸载后，已注入的隔离世界脚本还活着，但 chrome.runtime 已经失效。
+    // 这时直接 sendMessage 会抛 "Extension context invalidated."，每个标签页都冒一条
+    // 未捕获异常；这里先探测再调用，失败也回一条错误，页面脚本不用干等 12 秒超时。
+    let runtime = null;
+    try {
+      runtime = typeof chrome !== 'undefined' && chrome ? chrome.runtime : null;
+    } catch (e) {
+      runtime = null;
+    }
+    if (!runtime || !runtime.id) {
+      respond(message.requestId, { ok: false, error: 'extension context invalidated' });
+      return;
+    }
+
+    try {
+      runtime.sendMessage(
+        {
+          type: 'trakt-titles:fetch-translations',
+          path: message.path,
+          apiKey: message.apiKey,
+          token: message.token,
+        },
+        (response) => {
+          let relayed = { ok: false };
+          try {
+            relayed = runtime.lastError
+              ? { ok: false, error: runtime.lastError.message }
+              : (response || { ok: false });
+          } catch (e) {
+            relayed = { ok: false, error: String(e) };
+          }
+          respond(message.requestId, relayed);
+        }
+      );
+    } catch (e) {
+      // 读取 runtime 与 sendMessage 之间扩展刚好被重新加载时也会走到这里。
+      respond(message.requestId, { ok: false, error: String(e && e.message ? e.message : e) });
+    }
   });
 })();

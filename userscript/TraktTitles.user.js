@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Trakt Titles
 // @namespace    trakt-titles
-// @version      1.4.2
+// @version      1.4.3
 // @description  Restores missing titles on Trakt poster-only cards.
 // @author       lunanfo
 // @homepageURL  https://github.com/lunanfo/TraktTitles
@@ -184,14 +184,16 @@
         callback({ ok: false, error: 'bad path' });
         return false;
       }
+      var headers = {
+        'trakt-api-key': message.apiKey,
+        'trakt-api-version': '2',
+        'accept': 'application/json'
+      };
+      if (message.token) headers.authorization = 'Bearer ' + message.token;
       GM_xmlhttpRequest({
         method: 'GET',
         url: 'https://api.trakt.tv' + message.path,
-        headers: {
-          'trakt-api-key': message.apiKey,
-          'trakt-api-version': '2',
-          'accept': 'application/json'
-        },
+        headers: headers,
         onload: function (res) {
           try {
             var list = JSON.parse(res.responseText);
@@ -220,7 +222,14 @@
   const CARD_SELECTOR = '.trakt-card, .mini_card, .grid-item, [data-card]';
   const EXCLUDED_SELECTOR = 'header, nav, footer, [role="navigation"], [role="menu"], [role="menubar"], .breadcrumbs, .navbar, .comments, .trakt-now-playing-container, table, tbody';
 
-  const DEFAULT_API_KEY = '201dc70c5ec6af530f12f079ea1922733f6e1085ad7b02f36d8e011b75bcea7d';
+  // 源码里不内置 Trakt Client ID：
+  // 1) 优先用页面自己请求头里的 trakt-api-key（运行时捕获）；
+  // 2) 抓不到时，从页面已经加载的 JS 里读出站点自己的 Client ID（前端代码里本来就有）；
+  // 3) 想用自己的 Trakt 应用，可填这里或设置 window.__TRAKT_TITLES_CLIENT_ID__。
+  const CONFIGURED_API_KEY = '';
+  const API_KEY_WAIT_MS = 10000;
+  const API_KEY_SCRAPE_TTL = 6 * 60 * 60 * 1000;
+  const API_KEY_STORAGE_PREFIX = 'trakt_titles_api_key:';
   const API_VERSION = '2';
   const ZH_REGEX = /[\u4e00-\u9fa5]/;
   // 官方 /v3/intl/bulk 每个类型最多收 100 个 id，和网页端自己的上限保持一致。
@@ -236,7 +245,12 @@
   const inFlightIds = { movie: new Set(), show: new Set() };
 
   let capturedAuthToken = null;
-  let capturedApiKey = DEFAULT_API_KEY;
+  let apiCooldownUntil = 0;
+  let capturedApiKey = '';
+  let scrapedApiKey = '';
+  let apiKeyPromise = null;
+  let pageFetch = null;
+  const apiKeyWaiters = [];
   let bulkTimer = null;
   let renderTimer = null;
   // 中文名的语言/地区固定走简体：网页端自己的请求是 zh + CN，我们也不去跟它的地区走，
@@ -325,6 +339,217 @@
       && (!event.origin || event.origin === window.location.origin);
   }
 
+  function configuredApiKey() {
+    if (CONFIGURED_API_KEY) return CONFIGURED_API_KEY;
+    try {
+      return typeof window.__TRAKT_TITLES_CLIENT_ID__ === 'string'
+        ? window.__TRAKT_TITLES_CLIENT_ID__
+        : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function activeApiKey() {
+    return configuredApiKey() || capturedApiKey || scrapedApiKey;
+  }
+
+  // 晚到的 key：之前没有 key 时被缓存成 null 的译名结果要清掉，重扫时重新请求。
+  function clearUnresolvedApiKeyCaches() {
+    clearUnresolvedTvTimeCache();
+    [ogMediaCache, ogSeasonCache, ogEpisodeCache].forEach((cache) => {
+      cache.forEach((value, cacheKey) => {
+        if (value === null) cache.delete(cacheKey);
+      });
+    });
+  }
+
+  function setCapturedApiKey(key) {
+    if (typeof key !== 'string' || !key || key === capturedApiKey) return;
+    const hadKey = !!capturedApiKey;
+    capturedApiKey = key;
+    const waiters = apiKeyWaiters.splice(0);
+    waiters.forEach((resolve) => resolve(key));
+    if (!hadKey) {
+      clearUnresolvedApiKeyCaches();
+      schedule();
+    }
+  }
+
+  // 已登录用户的 OAuth token：优先用页面请求头里捕获的，其次从 localStorage 里找。
+  // 带上 token 的 GET 会走 Trakt 的「每个用户」限流桶，不再和匿名请求抢同一个额度。
+  function activeAuthToken() {
+    try {
+      return capturedAuthToken || getAuthToken() || '';
+    } catch (e) {
+      return capturedAuthToken || '';
+    }
+  }
+
+  function noteApiRateLimit(retryAfter) {
+    const seconds = Number(retryAfter);
+    const waitMs = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : 5000;
+    // 等待太久的 Retry-After 直接封顶，避免整页卡死。
+    apiCooldownUntil = Math.max(apiCooldownUntil, Date.now() + Math.min(waitMs, 60000));
+  }
+
+  function waitForApiCooldown() {
+    const remain = apiCooldownUntil - Date.now();
+    if (remain <= 0) return Promise.resolve();
+    return new Promise((resolve) => setTimeout(resolve, remain));
+  }
+
+  // 页面自己的 JS 里写着站点用的 Client ID；抓不到请求头时，从这里读。
+  function matchApiKeyInSource(source) {
+    const patterns = [
+      /trakt-api-key["'`]?\s*[,:]\s*["'`]([A-Za-z0-9_-]{20,})["'`]/,
+      /["'`]trakt-api-key["'`]\s*:\s*["'`]([A-Za-z0-9_-]{20,})["'`]/,
+      /TRAKT_CLIENT_ID["'`]?\s*[:=]\s*["'`]([A-Za-z0-9_-]{20,})["'`]/,
+    ];
+    for (const pattern of patterns) {
+      const match = String(source || '').match(pattern);
+      if (match) return match[1];
+    }
+    return '';
+  }
+
+  function readScrapedApiKeyCache() {
+    try {
+      const raw = sessionStorage.getItem(API_KEY_STORAGE_PREFIX + window.location.host);
+      if (!raw) return '';
+      const data = JSON.parse(raw);
+      if (!data || typeof data.key !== 'string' || !data.key) return '';
+      if (Date.now() - Number(data.at || 0) > API_KEY_SCRAPE_TTL) return '';
+      return data.key;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function writeScrapedApiKeyCache(key) {
+    try {
+      sessionStorage.setItem(
+        API_KEY_STORAGE_PREFIX + window.location.host,
+        JSON.stringify({ key, at: Date.now() })
+      );
+    } catch (e) { }
+  }
+
+  function pageScriptUrls() {
+    const urls = new Set();
+    const add = (value) => {
+      try {
+        const url = new URL(value, window.location.href);
+        if (url.origin !== window.location.origin) return;
+        if (!/\.js(?:\?|$)/.test(url.pathname + url.search)) return;
+        urls.add(url.href);
+      } catch (e) { }
+    };
+    document.querySelectorAll('script[src]').forEach((node) => add(node.getAttribute('src')));
+    document.querySelectorAll('link[rel="modulepreload"][href], link[rel="preload"][as="script"][href]')
+      .forEach((node) => add(node.getAttribute('href')));
+    try {
+      performance.getEntriesByType('resource').forEach((entry) => add(entry.name));
+    } catch (e) { }
+    return [...urls];
+  }
+
+  let scrapedApiKeyPromise = null;
+  let scrapedApiKeyTried = false;
+
+  async function scrapeApiKey() {
+    if (scrapedApiKey) return scrapedApiKey;
+    if (scrapedApiKeyPromise) return scrapedApiKeyPromise;
+
+    const cached = readScrapedApiKeyCache();
+    if (cached) {
+      scrapedApiKey = cached;
+      return cached;
+    }
+    // 只在页面 DOM/脚本基本就绪后扫一次，避免在 head 还没解析完时白跑。
+    if (document.readyState === 'loading') return '';
+
+    scrapedApiKeyPromise = (async () => {
+      const urls = pageScriptUrls();
+      const fetcher = pageFetch || (window.fetch || fetch);
+      let found = '';
+      let index = 0;
+      const worker = async () => {
+        while (!found && index < urls.length) {
+          const url = urls[index];
+          index += 1;
+          try {
+            const response = await fetcher(url, { credentials: 'same-origin' });
+            if (!response || !response.ok) continue;
+            const key = matchApiKeyInSource(await response.text());
+            if (key) found = key;
+          } catch (e) { }
+        }
+      };
+      await Promise.all(Array.from({ length: 6 }, () => worker()));
+      if (found) {
+        scrapedApiKey = found;
+        writeScrapedApiKeyCache(found);
+      }
+      return found;
+    })()
+      .then((key) => {
+        scrapedApiKeyTried = true;
+        return key;
+      })
+      .finally(() => {
+        scrapedApiKeyPromise = null;
+      });
+
+    return scrapedApiKeyPromise;
+  }
+
+  function waitForApiKey() {
+    const key = activeApiKey();
+    if (key) return Promise.resolve(key);
+    if (apiKeyPromise) return apiKeyPromise;
+
+    apiKeyPromise = new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value || '');
+      };
+
+      // 页面自己的请求头优先，等待期间随时可能被捕获。
+      apiKeyWaiters.push((captured) => finish(captured));
+
+      const tryScrape = () => {
+        if (settled) return;
+        scrapeApiKey()
+          .then((found) => { if (found) finish(found); })
+          .catch(() => { });
+      };
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', tryScrape, { once: true });
+        // 有些页面在 load 之后才插入脚本，再补一次。
+        window.addEventListener('load', () => {
+          // load 之后脚本/资源都齐了，没找到就再扫一次。
+          if (!settled) tryScrape();
+        }, { once: true });
+      } else {
+        tryScrape();
+      }
+
+      setTimeout(() => {
+        // 超时也再看一眼是否已经抓到/扫到了。
+        finish(activeApiKey());
+      }, API_KEY_WAIT_MS);
+    }).finally(() => {
+      // 允许后续（例如 key 过期/换页）重新等待。
+      apiKeyPromise = null;
+    });
+
+    return apiKeyPromise;
+  }
+
   // 首轮扫描可能早于隔离世界的 bridge.js 注入完成。清除失败结果，
   // 等桥就绪后重新请求，避免把“桥还没准备好”误缓存成“没有译名”。
   function clearUnresolvedTvTimeCache() {
@@ -410,7 +635,7 @@
   // 没有可用后台时（例如油猴脚本）退化成直接 fetch，至少 app.trakt.tv 同源场景还能用。
   // undefined = 没有可用桥接，可由调用方尝试页面 fetch；
   // null = 桥接存在但请求失败；对象 = 后台成功返回。
-  function requestTranslations(path, locale) {
+  async function requestTranslationsRaw(path, locale, apiKey, token) {
     return new Promise((resolve) => {
       try {
         // 油猴脚本由 build-userscript.js 注入 __gmBridge，扩展则有 chrome.runtime
@@ -419,11 +644,12 @@
             {
               type: 'trakt-titles:fetch-translations',
               path,
-              apiKey: capturedApiKey || DEFAULT_API_KEY,
+              apiKey,
+              token,
               language: locale.language,
               country: locale.country,
             },
-            (response) => resolve(response && response.ok ? response : null)
+            (response) => resolve(response || null)
           );
           return;
         }
@@ -439,7 +665,7 @@
             settled = true;
             window.removeEventListener('message', onMessage);
             clearTimeout(timer);
-            resolve(response && response.ok ? response : null);
+            resolve(response || null);
           };
           const onMessage = (event) => {
             if (!isPageMessage(event)) return;
@@ -453,7 +679,8 @@
             type: BRIDGE_REQUEST_TYPE,
             requestId,
             path,
-            apiKey: capturedApiKey || DEFAULT_API_KEY,
+            apiKey,
+            token,
             language: locale.language,
             country: locale.country,
           }, window.location.origin);
@@ -486,6 +713,33 @@
     });
   }
 
+  // 翻译请求统一入口：带 key + 已登录用户的 token；
+  // token 过期（401）时退回匿名，429 按 Retry-After 退避后重试一次。
+  async function requestTranslations(path, locale) {
+    const apiKey = await waitForApiKey();
+    if (!apiKey) return null;
+
+    const token = activeAuthToken();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await waitForApiCooldown();
+      let response = await requestTranslationsRaw(path, locale, apiKey, token);
+      // 没有可用的桥接：交给调用方用页面 fetch 兜底。
+      if (response === undefined) return undefined;
+
+      if (response && response.status === 401 && token) {
+        response = await requestTranslationsRaw(path, locale, apiKey, '');
+        if (response === undefined) return undefined;
+      }
+      if (response && response.ok) return response;
+      if (response && response.status === 429) {
+        noteApiRateLimit(response.retryAfter);
+        continue;
+      }
+      return null;
+    }
+    return null;
+  }
+
   window.addEventListener('message', (event) => {
     if (isPageMessage(event) && event.data && event.data.type === BRIDGE_READY_TYPE) {
       bridgeReady = true;
@@ -514,20 +768,50 @@
     return null;
   }
 
-  async function fetchTvTimeTranslationsInPage(path, locale) {
-    try {
-      const res = await (window.fetch || fetch)(`${TVTIME_API_ORIGIN}${path}`, {
-        headers: {
-          'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
-          'trakt-api-version': API_VERSION,
-          'accept': 'application/json',
-        },
-      });
-      if (!res.ok) return null;
-      return pickLocalizedTitle(await res.json(), locale);
-    } catch (e) {
-      return null;
+  // 页面内直接请求 api.trakt.tv（没有扩展后台时的兜底）：
+  // 同样带上已登录用户的 token，429 按 Retry-After 退避，token 过期（401）时退回匿名。
+  async function pageFetchTranslations(path, apiKey, token) {
+    const headers = {
+      'trakt-api-key': apiKey,
+      'trakt-api-version': API_VERSION,
+      'accept': 'application/json',
+    };
+    if (token) headers.authorization = `Bearer ${token}`;
+    return (window.fetch || fetch)(`${TVTIME_API_ORIGIN}${path}`, { headers });
+  }
+
+  async function fetchTranslationListInPage(path) {
+    const apiKey = await waitForApiKey();
+    if (!apiKey) return null;
+    const token = activeAuthToken();
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await waitForApiCooldown();
+      try {
+        let res = await pageFetchTranslations(path, apiKey, token);
+        if (res.status === 401 && token) {
+          res = await pageFetchTranslations(path, apiKey, '');
+        }
+        if (res.status === 429) {
+          const retryAfter = res.headers && typeof res.headers.get === 'function'
+            ? res.headers.get('retry-after')
+            : '';
+          noteApiRateLimit(retryAfter);
+          continue;
+        }
+        if (!res.ok) return null;
+        const list = await res.json();
+        return Array.isArray(list) ? list : [];
+      } catch (e) {
+        return null;
+      }
     }
+    return null;
+  }
+
+  async function fetchTvTimeTranslationsInPage(path, locale) {
+    const list = await fetchTranslationListInPage(path);
+    return list ? pickLocalizedTitle(list, locale) : null;
   }
 
   async function fetchMediaRowTitle(type, slug, locale) {
@@ -895,20 +1179,7 @@
   }
 
   async function requestOgTranslationsInPage(path) {
-    try {
-      const res = await (window.fetch || fetch)(`${TVTIME_API_ORIGIN}${path}`, {
-        headers: {
-          'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
-          'trakt-api-version': API_VERSION,
-          'accept': 'application/json',
-        },
-      });
-      if (!res.ok) return null;
-      const list = await res.json();
-      return Array.isArray(list) ? list : [];
-    } catch (e) {
-      return null;
-    }
+    return fetchTranslationListInPage(path);
   }
 
   // OG 站是英文界面，固定要简体中文：精确地区 cn → 无地区通用条目，
@@ -1562,11 +1833,19 @@
   function interceptFetch() {
     const origFetch = window.fetch;
     if (!origFetch || origFetch.__traktTitlesHooked) return;
+    // 抓 key 时要重新读取页面自己的 JS，绕开下面这层 hook，避免把 JS 响应当成 API JSON 解析。
+    try {
+      pageFetch = typeof origFetch.bind === 'function' ? origFetch.bind(window) : origFetch;
+    } catch (e) {
+      pageFetch = origFetch;
+    }
 
     const hookedFetch = async function (...args) {
       try {
         const [resource, config] = args;
-        const headers = config?.headers;
+        // fetch(url, { headers }) 或 fetch(new Request(url, { headers })) 两种写法都要能读到。
+        const headers = config?.headers
+          || (resource && typeof resource === 'object' && resource.headers);
         if (headers) {
           let auth = null;
           let key = null;
@@ -1581,7 +1860,7 @@
             const m = auth.match(/^Bearer\s+(.+)$/i);
             if (m) capturedAuthToken = m[1];
           }
-          if (key) capturedApiKey = key;
+          if (key) setCapturedApiKey(key);
         }
       } catch (e) { }
 
@@ -1605,6 +1884,23 @@
     window.fetch = hookedFetch;
   }
 
+  // 少数请求走 XHR；只读 setRequestHeader 里的 trakt-api-key，不改变请求行为。
+  function interceptXhrApiKey() {
+    if (typeof XMLHttpRequest === 'undefined' || !XMLHttpRequest.prototype) return;
+    const proto = XMLHttpRequest.prototype;
+    const original = proto.setRequestHeader;
+    if (!original || original.__traktTitlesHooked) return;
+
+    const hooked = function (name, value) {
+      try {
+        if (String(name).toLowerCase() === 'trakt-api-key') setCapturedApiKey(String(value));
+      } catch (e) { }
+      return original.apply(this, arguments);
+    };
+    hooked.__traktTitlesHooked = true;
+    proto.setRequestHeader = hooked;
+  }
+
   async function resolveSlug(type, slug) {
     const key = `${type}:${slug}`;
     if (mediaInfoCache.has(key) || resolvingSlugs.has(key)) return;
@@ -1612,14 +1908,23 @@
 
     try {
       const token = getAuthToken();
+      const apiKey = await waitForApiKey();
+      if (!apiKey) return;
       const headers = {
-        'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
+        'trakt-api-key': apiKey,
         'trakt-api-version': API_VERSION,
         'accept': 'application/json'
       };
       if (token) headers['authorization'] = `Bearer ${token}`;
 
+      await waitForApiCooldown();
       const res = await (window.fetch || fetch)(`https://api.trakt.tv/${type}s/${slug}?extended=min`, { headers });
+      if (res.status === 429) {
+        noteApiRateLimit(res.headers && typeof res.headers.get === 'function'
+          ? res.headers.get('retry-after')
+          : '');
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         if (data && data.ids && data.ids.trakt) {
@@ -1652,8 +1957,11 @@
   async function fetchBulkTitles(movieIds, showIds) {
     const token = getAuthToken();
     if (!token) return null;
+    const apiKey = await waitForApiKey();
+    if (!apiKey) return null;
 
     try {
+      await waitForApiCooldown();
       const params = new URLSearchParams({
         language: INTL_LANGUAGE,
         country: INTL_COUNTRY
@@ -1666,11 +1974,17 @@
           'accept': '*/*',
           'accept-language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
           'authorization': `Bearer ${token}`,
-          'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
+          'trakt-api-key': apiKey,
           'trakt-api-version': API_VERSION
         }
       });
 
+      if (res.status === 429) {
+        noteApiRateLimit(res.headers && typeof res.headers.get === 'function'
+          ? res.headers.get('retry-after')
+          : '');
+        return null;
+      }
       if (!res.ok) return null;
 
       const data = await res.json();
@@ -1696,13 +2010,30 @@
   async function resolveTranslationTitles(type, id) {
     const cacheKey = `${type}:${id}`;
     try {
-      const res = await (window.fetch || fetch)(`https://api.trakt.tv/${type}s/${id}/translations/zh`, {
-        headers: {
-          'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
+      const apiKey = await waitForApiKey();
+      if (!apiKey) return;
+      const token = activeAuthToken();
+      await waitForApiCooldown();
+
+      const request = (authToken) => {
+        const headers = {
+          'trakt-api-key': apiKey,
           'trakt-api-version': API_VERSION,
           'accept': 'application/json'
-        }
-      });
+        };
+        if (authToken) headers.authorization = `Bearer ${authToken}`;
+        return (window.fetch || fetch)(`https://api.trakt.tv/${type}s/${id}/translations/zh`, { headers });
+      };
+
+      let res = await request(token);
+      if (res.status === 401 && token) res = await request('');
+      if (res.status === 429) {
+        // 限流时不要缓存成「没有译名」，冷却结束后还能重试。
+        noteApiRateLimit(res.headers && typeof res.headers.get === 'function'
+          ? res.headers.get('retry-after')
+          : '');
+        return;
+      }
       if (!res.ok) {
         translationCache.set(cacheKey, null);
         return;
@@ -2176,19 +2507,36 @@
   async function resolveEpisodeTitles(slug, season) {
     const seasonKey = `${slug}:${season}`;
     if (attemptedEpisodeSeasons.has(seasonKey)) return;
+    const apiKey = await waitForApiKey();
+    if (!apiKey) return;
     attemptedEpisodeSeasons.add(seasonKey);
 
     try {
-      const res = await (window.fetch || fetch)(
-        `https://api.trakt.tv/shows/${encodeURIComponent(slug)}/seasons/${season}/episodes?translations=zh`,
-        {
-          headers: {
-            'trakt-api-key': capturedApiKey || DEFAULT_API_KEY,
-            'trakt-api-version': API_VERSION,
-            'accept': 'application/json'
-          }
-        }
-      );
+      const token = activeAuthToken();
+      await waitForApiCooldown();
+
+      const request = (authToken) => {
+        const headers = {
+          'trakt-api-key': apiKey,
+          'trakt-api-version': API_VERSION,
+          'accept': 'application/json'
+        };
+        if (authToken) headers.authorization = `Bearer ${authToken}`;
+        return (window.fetch || fetch)(
+          `https://api.trakt.tv/shows/${encodeURIComponent(slug)}/seasons/${season}/episodes?translations=zh`,
+          { headers }
+        );
+      };
+
+      let res = await request(token);
+      if (res.status === 401 && token) res = await request('');
+      if (res.status === 429) {
+        attemptedEpisodeSeasons.delete(seasonKey);
+        noteApiRateLimit(res.headers && typeof res.headers.get === 'function'
+          ? res.headers.get('retry-after')
+          : '');
+        return;
+      }
       if (res.ok) {
         const list = await res.json();
         if (Array.isArray(list)) {
@@ -2261,6 +2609,7 @@
   loadStoredCache();
   loadOgCache();
   interceptFetch();
+  interceptXhrApiKey();
 
   const observer = new MutationObserver(schedule);
   // SvelteKit 切换焦点位 / 详情内容时先改 href，再换文本；两种站都需要立刻重扫。

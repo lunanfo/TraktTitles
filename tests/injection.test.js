@@ -15,6 +15,12 @@ const styleSource = process.env.TARGET === 'userscript'
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// 源码不再内置 Trakt Client ID：测试通过页面全局注入一个，避免每条用例都等运行时捕获。
+function evalSourceWithApiKey(dom) {
+  dom.window.__TRAKT_TITLES_CLIENT_ID__ = 'test-client-id';
+  dom.window.eval(source);
+}
+
 async function runSearchTest() {
   const dom = new JSDOM(`<!doctype html><html><body>
     <div class="trakt-card poster-only">
@@ -53,7 +59,7 @@ async function runSearchTest() {
     pretendToBeVisual: true
   });
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(180);
 
   const doc = dom.window.document;
@@ -117,7 +123,7 @@ async function runSmartListTest() {
     'movie:970531': '歪心狼对阵ACME'
   }));
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(180);
 
   const doc = dom.window.document;
@@ -167,7 +173,7 @@ async function runSmartListOverviewPosterTest() {
     'movie:970531': '歪心狼对阵ACME'
   }));
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(180);
 
   const doc = dom.window.document;
@@ -229,7 +235,7 @@ async function runLiveResolveTest() {
     throw new Error('Unknown URL: ' + url);
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(280);
 
   const doc = dom.window.document;
@@ -282,7 +288,7 @@ async function runLivePosterResolveTest() {
     throw new Error('Unknown URL: ' + url);
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(280);
 
   const doc = dom.window.document;
@@ -359,7 +365,7 @@ async function runDiscoverTitleTest() {
     'movie:905132': '蜘蛛侠：崭新之日'
   }));
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(200);
 
   const doc = dom.window.document;
@@ -481,7 +487,7 @@ async function runDiscoverTranslationFetchTest() {
     throw new Error('Unknown URL: ' + target);
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(320);
 
   const doc = dom.window.document;
@@ -530,7 +536,7 @@ async function runDiscoverEpisodeCardTest() {
     'show:170228': '暗夜情报员'
   }));
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(200);
 
   const doc = dom.window.document;
@@ -574,7 +580,7 @@ async function runNowPlayingTest() {
     'movie:1224034': '大学炸弹客'
   }));
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(180);
 
   const doc = dom.window.document;
@@ -630,7 +636,7 @@ async function runNowPlayingEpisodeTest() {
     'show:170228': '暗夜情报员'
   }));
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(180);
 
   const doc = dom.window.document;
@@ -709,7 +715,7 @@ async function runNowPlayingEpisodeTitleTest() {
     throw new Error('Unknown URL: ' + url);
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(300);
 
   const doc = dom.window.document;
@@ -765,7 +771,7 @@ async function runNowPlayingSwitchToMovieTest() {
     'movie:1224034': '大学炸弹客'
   }));
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(200);
 
   const doc = dom.window.document;
@@ -831,7 +837,7 @@ async function runTvTimeMediaRowTest() {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), clone() { return this; } });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
 
   const doc = dom.window.document;
   const row = doc.querySelector('article.media-row');
@@ -883,7 +889,7 @@ async function runTvTimeIsolationTest() {
     calls.push(String(url));
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]), clone() { return this; } });
   };
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(200);
 
   const doc = dom.window.document;
@@ -937,7 +943,7 @@ async function runTvTimeBackgroundRelayTest() {
   });
   dom.window.fetch = () => Promise.reject(new Error('CORS blocked'));
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
 
   const doc = dom.window.document;
   const row = doc.querySelector('article.media-row');
@@ -985,7 +991,7 @@ async function runTvTimeJapaneseLocaleTest() {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), clone() { return this; } });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
 
   const doc = dom.window.document;
   const title = doc.querySelector('a.media-row-title');
@@ -1038,7 +1044,7 @@ async function runTvTimeBridgeFailureDoesNotFallbackTest() {
     }, dom.window.location.origin), 5);
   });
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(300);
 
   assert.strictEqual(pageFetchCalls, 0, 'bridge failures do not fall back to a CORS-blocked page fetch');
@@ -1076,7 +1082,7 @@ async function runTvTimeRegionalFallbackTest() {
     });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
 
   const doc = dom.window.document;
   const title = doc.querySelector('a.media-row-title');
@@ -1111,7 +1117,7 @@ async function runTvTimeNoFalseTranslationTest() {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), clone() { return this; } });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(300);
 
   const doc = dom.window.document;
@@ -1173,7 +1179,7 @@ async function runTvTimePosterCardTest() {
     });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
 
   const doc = dom.window.document;
   const showTitle = doc.querySelector('.show-card .poster-title');
@@ -1247,7 +1253,7 @@ async function runTvTimeDiscoverSpotlightSwitchTest() {
     });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
 
   const doc = dom.window.document;
   const body = doc.querySelector('.discover-spotlight-content');
@@ -1343,7 +1349,7 @@ async function runTvTimeUpcomingTest() {
     });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
 
   const doc = dom.window.document;
   const rows = doc.querySelectorAll('article.media-row');
@@ -1428,7 +1434,7 @@ async function runOgTrendingTest() {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), clone() { return this; } });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(1500);
 
   const doc = dom.window.document;
@@ -1507,7 +1513,7 @@ async function runOgDetailTest() {
     });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(1500);
 
   const doc = dom.window.document;
@@ -1569,7 +1575,7 @@ async function runOgEpisodeTest() {
     });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(1500);
 
   const doc = dom.window.document;
@@ -1644,7 +1650,7 @@ async function runOgSeasonRowsTest() {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), clone() { return this; } });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(1500);
 
   const doc = dom.window.document;
@@ -1738,7 +1744,7 @@ async function runOgUpcomingScheduleTest() {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), clone() { return this; } });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(1600);
 
   const doc = dom.window.document;
@@ -1822,7 +1828,7 @@ async function runOgUpNextTest() {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), clone() { return this; } });
   };
 
-  dom.window.eval(source);
+  evalSourceWithApiKey(dom);
   await wait(1600);
 
   const doc = dom.window.document;
@@ -1851,6 +1857,207 @@ async function runOgUpNextTest() {
   // 重复扫描不能把集号吃掉或叠出第二份。
   await wait(300);
   assert.strictEqual(cards[0].textContent.replace(/\s+/g, ' ').trim(), '2x01 你好，科贝尔女士');
+}
+
+
+// 页面自己的请求头里带着 trakt-api-key：源码不内置 key，等捕获后再发翻译请求。
+async function runApiKeyCaptureTest() {
+  const dom = new JSDOM(`<!doctype html><html lang="en"><body>
+    <article class="fanart-card">
+      <div class="title-wrapper">
+        <h3><a class="titles-link" href="/shows/visionquest">VisionQuest</a></h3>
+      </div>
+    </article>
+  </body></html>`, {
+    url: 'https://og.trakt.tv/shows/trending',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true,
+  });
+
+  const calls = [];
+  dom.window.fetch = (url, options = {}) => {
+    const headers = options.headers || {};
+    const key = typeof headers.get === 'function'
+      ? headers.get('trakt-api-key')
+      : headers['trakt-api-key'];
+    calls.push({ url: String(url), key });
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([{ language: 'zh', country: 'cn', title: '幻视任务' }]),
+      clone() { return this; },
+    });
+  };
+
+  // 不注入配置 key：先等页面自己的请求；封面上没有脚本，扫不到 key，只能靠捕获。
+  dom.window.eval(source);
+  await wait(300);
+
+  dom.window.fetch('https://apiz.trakt.tv/v3/intl/bulk?language=zh&country=CN', {
+    headers: { 'trakt-api-key': 'captured-from-page' },
+  });
+
+  const doc = dom.window.document;
+  const title = doc.querySelector('article.fanart-card h3');
+  for (let i = 0; i < 80 && !/幻视/.test(title.textContent); i++) await wait(50);
+
+  assert.strictEqual(title.textContent.trim(), '幻视任务', 'translation runs once the page key is captured');
+  const translationCall = calls.find((call) => call.url.includes('/shows/visionquest/translations/zh'));
+  assert(translationCall, 'a translation request is made after capture');
+  assert.strictEqual(translationCall.key, 'captured-from-page', 'the captured key is forwarded');
+}
+
+// 已登录用户：请求带上 Bearer token，走 AUTHED 限流桶。
+async function runApiTokenForwardTest() {
+  const dom = new JSDOM(`<!doctype html><html lang="en"><body>
+    <article class="fanart-card">
+      <div class="title-wrapper">
+        <h3><a class="titles-link" href="/shows/tulsa-king">Tulsa King</a></h3>
+      </div>
+    </article>
+  </body></html>`, {
+    url: 'https://og.trakt.tv/shows/trending',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true,
+  });
+
+  dom.window.localStorage.setItem('oidc.user:https://auth.trakt.tv:trakt', JSON.stringify({
+    access_token: 'user-access-token',
+  }));
+
+  const calls = [];
+  dom.window.fetch = (url, options = {}) => {
+    const headers = options.headers || {};
+    const read = (name) => (typeof headers.get === 'function'
+      ? headers.get(name)
+      : headers[name]);
+    calls.push({ url: String(url), key: read('trakt-api-key'), auth: read('authorization') });
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([{ language: 'zh', country: 'cn', title: '塔尔萨之王' }]),
+      clone() { return this; },
+    });
+  };
+
+  evalSourceWithApiKey(dom);
+  const doc = dom.window.document;
+  const title = doc.querySelector('article.fanart-card h3');
+  for (let i = 0; i < 80 && !/塔尔萨/.test(title.textContent); i++) await wait(50);
+
+  assert.strictEqual(title.textContent.trim(), '塔尔萨之王');
+  const translationCall = calls.find((call) => call.url.includes('/shows/tulsa-king/translations/zh'));
+  assert(translationCall, 'translation request is made');
+  assert.strictEqual(translationCall.key, 'test-client-id');
+  assert.strictEqual(
+    translationCall.auth,
+    'Bearer user-access-token',
+    'the signed-in user token is forwarded so the request uses the authed bucket'
+  );
+}
+
+// 429 按 Retry-After 退避后重试，不把「限流」当成「没有译名」。
+async function runRateLimitBackoffTest() {
+  const dom = new JSDOM(`<!doctype html><html lang="en"><body>
+    <article class="fanart-card">
+      <div class="title-wrapper">
+        <h3><a class="titles-link" href="/shows/severance">Severance</a></h3>
+      </div>
+    </article>
+  </body></html>`, {
+    url: 'https://og.trakt.tv/shows/trending',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true,
+  });
+
+  let translationAttempts = 0;
+  dom.window.fetch = (url) => {
+    const target = String(url);
+    if (target.includes('/shows/severance/translations/zh')) {
+      translationAttempts += 1;
+      if (translationAttempts === 1) {
+        return Promise.resolve({
+          ok: false,
+          status: 429,
+          headers: { get: (name) => (String(name).toLowerCase() === 'retry-after' ? '0' : null) },
+          json: () => Promise.resolve(null),
+          clone() { return this; },
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve([{ language: 'zh', country: 'cn', title: '人生切割术' }]),
+        clone() { return this; },
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([]),
+      clone() { return this; },
+    });
+  };
+
+  evalSourceWithApiKey(dom);
+  const title = dom.window.document.querySelector('article.fanart-card h3');
+  for (let i = 0; i < 120 && !/人生切割/.test(title.textContent); i++) await wait(50);
+
+  assert.strictEqual(title.textContent.trim(), '人生切割术');
+  assert.ok(translationAttempts >= 2, 'the request is retried after a 429');
+}
+
+
+// 首屏没有带 key 的客户端请求时（服务端渲染页面），从页面已加载的 JS 里读出站点自己的 Client ID。
+async function runApiKeyScrapeTest() {
+  const dom = new JSDOM(`<!doctype html><html><head>
+    <link rel="modulepreload" href="/_app/chunk.js">
+  </head><body>
+    <article class="fanart-card">
+      <div class="title-wrapper">
+        <h3><a class="titles-link" href="/shows/visionquest">VisionQuest</a></h3>
+      </div>
+    </article>
+  </body></html>`, {
+    url: 'https://og.trakt.tv/shows/trending',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true,
+  });
+
+  const scrapedKey = 'scraped-key-0123456789abcdefghijklmnopqrstuvwxyz';
+  const calls = [];
+  dom.window.fetch = (url, options = {}) => {
+    const target = String(url);
+    if (target.includes('/_app/chunk.js')) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('o.set(`trakt-api-key`,`' + scrapedKey + '`)'),
+        json: () => Promise.reject(new Error('not json')),
+        clone() { return this; },
+      });
+    }
+    const headers = options.headers || {};
+    const key = typeof headers.get === 'function' ? headers.get('trakt-api-key') : headers['trakt-api-key'];
+    calls.push({ url: target, key });
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([{ language: 'zh', country: 'cn', title: '幻视任务' }]),
+      text: () => Promise.resolve(''),
+      clone() { return this; },
+    });
+  };
+
+  // 不注入配置 key，也不触发页面请求，只能从 JS 里扫。
+  dom.window.eval(source);
+  const title = dom.window.document.querySelector('article.fanart-card h3');
+  for (let i = 0; i < 120 && !/幻视/.test(title.textContent); i++) await wait(50);
+
+  assert.strictEqual(title.textContent.trim(), '幻视任务');
+  const translationCall = calls.find((call) => call.url.includes('/shows/visionquest/translations/zh'));
+  assert(translationCall, 'translation request is made after scraping the key');
+  assert.strictEqual(translationCall.key, scrapedKey, 'the scraped client id is used');
 }
 
 (async () => {
@@ -1882,6 +2089,10 @@ async function runOgUpNextTest() {
   await runOgSeasonRowsTest();
   await runOgUpcomingScheduleTest();
   await runOgUpNextTest();
+  await runApiKeyCaptureTest();
+  await runApiKeyScrapeTest();
+  await runApiTokenForwardTest();
+  await runRateLimitBackoffTest();
   console.log(`[${process.env.TARGET || 'extension'}] RESULT: ALL PASS`);
   process.exit(0);
 })();

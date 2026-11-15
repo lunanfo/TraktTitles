@@ -1,12 +1,12 @@
 {
   "name": "trakt-titles",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "private": true,
   "description": "Restores missing titles on Trakt poster cards and uses official localized titles.",
   "scripts": {
     "build:userscript": "node tools/build-userscript.js",
     "build": "npm run build:userscript",
-    "test": "TARGET=extension node tests/injection.test.js && TARGET=userscript node tests/injection.test.js"
+    "test": "TARGET=extension node tests/injection.test.js && TARGET=userscript node tests/injection.test.js && node tests/bridge.test.js"
   },
   "devDependencies": {
     "jsdom": "^30.0.0"

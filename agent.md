@@ -43,3 +43,8 @@ Trakt 网页（app.trakt.tv）中：
    - Dashboard 的 **Upcoming Schedule**（`components/dashboard/SchedulePanel.svelte`）不走 h3：周视图的剧名是 `a.show`，焦点卡片是 `.schedule h4 > a`，日程里的集名在 `.schedule .episodes a[href*="/episodes/"]`（结构 `<a><b>3x04</b> 集名</a>`，只改文本节点），电影那行是 `.schedule .episodes .tagline`（Trakt tagline）。日期标题 `h3`（Today / Tomorrow + 日期）是界面文案，不能动。
    - 接口和 tvtime 一样走公开 API+后台桥：`/shows|movies/{slug}/translations/zh`、`/shows/{slug}/seasons/{s}/translations/zh`、`/shows/{slug}/seasons/{s}/episodes/{e}/translations/zh`。只取 `country=cn`，没有就退回无地区条目，没有简体标题就保留英文原名，不用 tw/hk 补位。
    - 译名 / 简介按 `` `${type}:${slug}` ``、`` `${slug}:${s}` ``、`` `${slug}:${s}:${e}` `` 存 `sessionStorage`（`trakt_og_zh_cache`）；请求走 6 并发的队列，避免一页几十张卡一次性打爆接口。
+7. **Client ID / token / 限流** —— 源码里**不再硬编码** Trakt Client ID（`DEFAULT_API_KEY` 已删除）：
+   - 取 key 的顺序：`CONFIGURED_API_KEY` / `window.__TRAKT_TITLES_CLIENT_ID__` → 页面请求头捕获的 `trakt-api-key`（`interceptFetch` + `interceptXhrApiKey`）→ 从页面已加载的同源 JS 里扫 `trakt-api-key` 字面量（`matchApiKeyInSource`），结果按 host 存 `sessionStorage`（`trakt_titles_api_key:<host>`，6 小时）。
+   - 页面发请求前会先 `waitForApiKey()`：先等捕获（页面自己的请求），同时从 JS 里扫；10 秒仍没有就放弃并跳过请求（不拿空 key 乱打）。
+   - 已登录时 `activeAuthToken()`（捕获的 `Bearer` 或 localStorage 里的 OIDC token）会随请求一起传：扩展后台和油猴桥都会带上 `Authorization`；带 token 的公开 GET 走 Trakt 的 AUTHED 桶（500 次/5 分钟/用户），匿名请求走 `Client ID + 公网 IP` 桶（也是 500 次/5 分钟）。401 时自动重试一次匿名请求。
+   - 429：`noteApiRateLimit(Retry-After)` 记录冷却（上限 60 秒），所有请求先等冷却；翻译主链路会重试一次，`resolveTranslationTitles` / 分集列表在 429 时不缓存 null，避免把限流误记成「没有译名」。
