@@ -11,7 +11,7 @@ Trakt 网页端（[app.trakt.tv](https://app.trakt.tv)）在部分位置（如�
 3. **零多余请求与持久缓存** —— 其他页面中已在 HTML 后台（`aria-label` / `img[alt]`）提供中文名称的卡片直接复用 DOM，不发起任何多余 API；已请求的媒体信息与译名通过 `sessionStorage` 内存缓存，避免重复请求，保证页面极速加载。
 4. **对齐徽标** —— 海报底部居中的浮层徽标（如“新”）微调上移，保持所有卡片标题落在同一条水平基线上。
 5. **新版 TV Time 网页（tvtime.trakt.tv）按 Trakt 设置语言显示剧名** —— 该站横向大卡片的剧名和单集名可能仍是英文。扩展读取页面的 `html[lang]`（必要时用 `PARAGLIDE_LOCALE` cookie）作为 Trakt 当前语言，通过后台脚本请求 `api.trakt.tv/{shows|movies}/{slug}/translations/{language}` 和单集翻译接口。同一语言内优先精确地区，其次使用无地区的通用条目；没有对应译名时保留英文原名。命中译名后把本地化名称写进标题，并把英文原名缩成下面一行，与 Trakt 自身的双语排版一致。简体中文不会拿繁体条目补位，繁体中文也不会拿简体条目补位。
-6. **OG Redux（og.trakt.tv）剧名与简介汉化** —— 这个站是经典 Trakt 界面的大屏重制版，整站英文。扩展复用同一套公开翻译接口，把剧名、电影名、单集名换成简体中文：标题是英文 logo 图时隐藏 logo 改用中文文本，详情页、榜单和 Discover 焦点位再补一行英文原名，普通卡片把原名放进鼠标悬停提示（tooltip）。详情页 `.overview`、分集简介和 `.tagline` 宣传语也一并翻译；Dashboard 的 **Upcoming Schedule**（焦点卡片、周视图的剧名 / 集名 / 电影 tagline）和 **Up Next**（集号 + 中文集名、剧名小行）同样覆盖。同样只取 `country=cn` 的简体条目，没有简体标题就保留英文原名，不用繁体补位；译名和简介按会话缓存，同一作品只请求一次。
+6. **OG Redux（og.trakt.tv）剧名与简介汉化** —— 这个站是经典 Trakt 界面的大屏重制版，整站英文。扩展复用同一套公开翻译接口，把剧名、电影名、单集名换成简体中文：标题是英文 logo 图时隐藏 logo 改用中文文本，详情页、榜单和 Discover 焦点位再补一行英文原名，普通卡片把原名放进鼠标悬停提示（tooltip）。详情页 `.overview`、分集简介和 `.tagline` 宣传语也一并翻译；Dashboard 的 **Upcoming Schedule**（焦点卡片、周视图的剧名 / 集名 / 电影 tagline）、**Up Next**（集号 + 中文集名、剧名小行）以及顶部/底部的 **Watching Now** 条（剧名 + 带引号的集名）同样覆盖。同样只取 `country=cn` 的简体条目，没有简体标题就保留英文原名，不用繁体补位；译名和简介按会话缓存，同一作品只请求一次。
 7. **不内置 Client ID + 登录 token + 429 退避** —— 翻译请求的 `trakt-api-key` 不再写死在源码里：优先从页面自己的请求头捕获，抓不到就从页面已加载的 JS 里读出站点自己的 Client ID（也可填自己的应用 Client ID）。已登录时把页面里的 OAuth token 一起带上，请求走 Trakt 的「每个用户」限流桶；token 过期自动退回匿名。遇到 429 会按 `Retry-After` 暂停并重试一次。
 
 ---

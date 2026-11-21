@@ -40,6 +40,7 @@ Trakt 网页（app.trakt.tv）中：
    - 榜单 / Discover 焦点位：`section.chart-hero`、`section.hero` 里的 `h2.name`（可能是 logo）+ `p.overview`，媒体从 `h2 a[href]` 或 `a.button.primary[href]` 解析。
    - 季页分集行：`h3[id^="episode-"]` 里第二个链接是集名，`article.row .overview` 是该集简介。
    - Dashboard 的 **Up Next**（`components/media/OnDeckCard.svelte` → `PosterCard.svelte`）把「集号 + 集名」拼成**一个文本节点**（`3x03 集名`，h3 里没有 `.number` span），替换时要用正则保留 `S2E01` / `3x03` / `3x03 (669)` / `Special 2` 前缀，否则界面上只剩中文集名；卡片下面的剧名小行是 `a.show-link`（不是 `a.show`），也要翻译。
+   - **Watching Now** 条（`components/users/WatchingNowBar.svelte`）：`p.what > a` 里 `<strong>` 是剧名/片名，`.episode-title` 是带引号的集名（`"Eyes on the Inside"`），`.sxe` 的集号不动；替换集名时要用 `ogPreserveQuotes` 保留原引号，`who-text` 的 UI 文案不动。
    - Dashboard 的 **Upcoming Schedule**（`components/dashboard/SchedulePanel.svelte`）不走 h3：周视图的剧名是 `a.show`，焦点卡片是 `.schedule h4 > a`，日程里的集名在 `.schedule .episodes a[href*="/episodes/"]`（结构 `<a><b>3x04</b> 集名</a>`，只改文本节点），电影那行是 `.schedule .episodes .tagline`（Trakt tagline）。日期标题 `h3`（Today / Tomorrow + 日期）是界面文案，不能动。
    - 接口和 tvtime 一样走公开 API+后台桥：`/shows|movies/{slug}/translations/zh`、`/shows/{slug}/seasons/{s}/translations/zh`、`/shows/{slug}/seasons/{s}/episodes/{e}/translations/zh`。只取 `country=cn`，没有就退回无地区条目，没有简体标题就保留英文原名，不用 tw/hk 补位。
    - 译名 / 简介按 `` `${type}:${slug}` ``、`` `${slug}:${s}` ``、`` `${slug}:${s}:${e}` `` 存 `sessionStorage`（`trakt_og_zh_cache`）；请求走 6 并发的队列，避免一页几十张卡一次性打爆接口。

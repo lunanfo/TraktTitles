@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Trakt Titles
 // @namespace    trakt-titles
-// @version      1.4.3
+// @version      1.4.4
 // @description  Restores missing titles on Trakt poster-only cards.
 // @author       lunanfo
 // @homepageURL  https://github.com/lunanfo/TraktTitles
@@ -1358,6 +1358,13 @@
     return prefix ? `${prefix} ${localizedTitle}` : localizedTitle;
   }
 
+  // Watching Now 的集名自带引号（`"Eyes on the Inside"`），替换时把引号保留下来。
+  function ogPreserveQuotes(current, value) {
+    const text = String(current || '').trim();
+    const match = text.match(/^(["'“”‘’]+)([\s\S]*?)(["'“”‘’]+)$/);
+    return match ? `${match[1]}${value}${match[3]}` : value;
+  }
+
   // 把译名写进标题（文本或 logo 两种形态都支持）。
   // 没有译名 / 译名与原名相同时恢复英文，并清掉我们插入的节点。
   function ogApplyTitle(host, key, translation, options = {}) {
@@ -1416,7 +1423,10 @@
     if (textElement) {
       const node = ogDirectTextNode(textElement);
       if (node) {
-        replaceNodeText(node, ogTitleNodeText(key, node.nodeValue, localizedTitle));
+        replaceNodeText(
+          node,
+          ogPreserveQuotes(node.nodeValue, ogTitleNodeText(key, node.nodeValue, localizedTitle))
+        );
       } else if (!textElement.children.length) {
         textElement.textContent = localizedTitle;
       }
@@ -1607,6 +1617,36 @@
     });
   }
 
+  // 顶部 / 底部浮动的 Watching Now 条（WatchingNowBar）：
+  // `<p class="what"><a href=…><strong>剧名</strong><span class="episode">…</span></a>`
+  // 里 strong 是剧名/片名，`.episode-title` 是带引号的集名，`.sxe` 的集号保持不动。
+  function scanOgWatchingNow() {
+    document.querySelectorAll('p.what > a[href]').forEach((link) => {
+      const entry = ogEntryFromHref(link.getAttribute('href'));
+      if (!entry) return;
+
+      const showTitle = link.querySelector('strong');
+      if (showTitle) {
+        const data = ensureOgMedia(entry.type, entry.slug);
+        if (data !== undefined) {
+          ogApplyTitle(showTitle, `${entry.type}:${entry.slug}`, data, { tooltip: true });
+        }
+      }
+
+      const episodeTitle = link.querySelector('.episode-title');
+      if (episodeTitle && entry.season != null && entry.number != null) {
+        const data = ensureOgEpisode(entry.slug, entry.season, entry.number);
+        if (data !== undefined) {
+          ogApplyTitle(
+            episodeTitle,
+            `episode:${entry.slug}:${entry.season}:${entry.number}`,
+            data
+          );
+        }
+      }
+    });
+  }
+
   // 有些标题不在 h3 里：Dashboard 的 Upcoming Schedule 用 `a.show`（周视图）
   // 和 `.schedule h4 > a`（焦点卡片），日程里的单集名则是 `.episodes` 下的链接，
   // 结构是 `<a href><b>3x04</b> 集名</a>`，只能改文本节点、保留 <b> 集号。
@@ -1665,6 +1705,7 @@
     const route = ogDetailRoute();
     if (route) scanOgDetail(route);
     scanOgHeroes();
+    scanOgWatchingNow();
     scanOgInlineTitles();
     scanOgCards();
     scanOgEpisodeRows();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Trakt Titles",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "Restores missing titles on poster-only Trakt cards, keeps official bilingual titles on smart lists, search and discover pages, localizes show and episode titles on tvtime.trakt.tv, and translates titles and overviews on og.trakt.tv.",
   "homepage_url": "https://github.com/lunanfo/TraktTitles",
   "icons": {

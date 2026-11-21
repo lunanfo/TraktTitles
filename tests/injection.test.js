@@ -2060,6 +2060,69 @@ async function runApiKeyScrapeTest() {
   assert.strictEqual(translationCall.key, scrapedKey, 'the scraped client id is used');
 }
 
+
+// 顶部/底部的 Watching Now 条：strong 是剧名，.episode-title 是带引号的集名。
+async function runOgWatchingNowTest() {
+  const dom = new JSDOM(`<!doctype html><html lang="en"><body>
+    <div class="container"><div class="row">
+      <a class="thumb" href="/shows/nocturne/seasons/1/episodes/3" aria-hidden="true"><img src="still.webp" alt=""></a>
+      <div class="info">
+        <p class="who"><span class="dot live"></span><span class="who-text">Watching Now</span></p>
+        <p class="what"><a href="/shows/nocturne/seasons/1/episodes/3"><strong>Nocturne</strong> <span class="episode"><span class="sxe">1x03</span> <span class="episode-title">"Eyes on the Inside"</span></span></a></p>
+      </div>
+      <div class="scrubber"><span class="elapsed">21:41</span></div>
+    </div></div>
+    <div class="container"><div class="row">
+      <div class="info">
+        <p class="who"><span class="who-text">Watching Now</span></p>
+        <p class="what"><a href="/movies/war-2025"><strong>War</strong></a></p>
+      </div>
+    </div></div>
+  </body></html>`, {
+    url: 'https://og.trakt.tv/dashboard',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true,
+  });
+
+  const calls = [];
+  dom.window.fetch = (url) => {
+    calls.push(String(url));
+    const target = String(url);
+    let body = [];
+    if (target.includes('/shows/nocturne/translations/zh')) {
+      body = [{ language: 'zh', country: 'cn', title: '夜曲' }];
+    } else if (target.includes('/shows/nocturne/seasons/1/episodes/3/translations/zh')) {
+      body = [{ language: 'zh', country: 'cn', title: '墙内眼线' }];
+    } else if (target.includes('/movies/war-2025/translations/zh')) {
+      body = [{ language: 'zh', country: 'cn', title: '战争' }];
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), clone() { return this; } });
+  };
+
+  evalSourceWithApiKey(dom);
+  const doc = dom.window.document;
+  const bars = doc.querySelectorAll('p.what');
+  const showTitle = bars[0].querySelector('strong');
+  const episodeTitle = bars[0].querySelector('.episode-title');
+
+  for (let i = 0; i < 80 && showTitle.textContent !== '夜曲'; i++) await wait(50);
+
+  assert.strictEqual(showTitle.textContent, '夜曲', 'Watching Now show title is localized');
+  assert.strictEqual(
+    episodeTitle.textContent,
+    '"墙内眼线"',
+    'episode title is localized and keeps its quotes'
+  );
+  assert.strictEqual(bars[0].querySelector('.sxe').textContent, '1x03', 'episode number stays');
+  assert.strictEqual(doc.querySelector('.who-text').textContent, 'Watching Now', 'UI label stays');
+
+  const movieTitle = bars[1].querySelector('strong');
+  for (let i = 0; i < 40 && movieTitle.textContent !== '战争'; i++) await wait(50);
+  assert.strictEqual(movieTitle.textContent, '战争', 'movie title in Watching Now is localized');
+
+  assert.ok(calls.some((u) => u.includes('/shows/nocturne/seasons/1/episodes/3/translations/zh')));
+}
+
 (async () => {
   await runSearchTest();
   await runSmartListTest();
@@ -2093,6 +2156,7 @@ async function runApiKeyScrapeTest() {
   await runApiKeyScrapeTest();
   await runApiTokenForwardTest();
   await runRateLimitBackoffTest();
+  await runOgWatchingNowTest();
   console.log(`[${process.env.TARGET || 'extension'}] RESULT: ALL PASS`);
   process.exit(0);
 })();
